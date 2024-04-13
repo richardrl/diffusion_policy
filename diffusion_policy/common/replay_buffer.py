@@ -98,6 +98,8 @@ class ReplayBuffer:
         for key, value in root['data'].items():
             assert(value.shape[0] == root['meta']['episode_ends'][-1])
         self.root = root
+        import pdb
+        pdb.set_trace()
     
     # ============= create constructors ===============
     @classmethod

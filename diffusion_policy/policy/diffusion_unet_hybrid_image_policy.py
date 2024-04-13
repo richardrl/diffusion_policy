@@ -99,6 +99,7 @@ class DiffusionUnetHybridImagePolicy(BaseImagePolicy):
                 device='cpu',
             )
 
+        # encodes raw images to latent embedding
         obs_encoder = policy.nets['policy'].nets['encoder'].nets['obs']
         
         if obs_encoder_group_norm:
@@ -239,6 +240,7 @@ class DiffusionUnetHybridImagePolicy(BaseImagePolicy):
             this_nobs = dict_apply(nobs, lambda x: x[:,:To,...].reshape(-1,*x.shape[2:]))
             nobs_features = self.obs_encoder(this_nobs)
             # reshape back to B, Do
+            # the latent observations become the global embedding
             global_cond = nobs_features.reshape(B, -1)
             # empty data for action
             cond_data = torch.zeros(size=(B, T, Da), device=device, dtype=dtype)
@@ -311,6 +313,7 @@ class DiffusionUnetHybridImagePolicy(BaseImagePolicy):
             trajectory = cond_data.detach()
 
         # generate impainting mask
+        # e.g. the mask over observation
         condition_mask = self.mask_generator(trajectory.shape)
 
         # Sample noise that we'll add to the images
@@ -330,6 +333,8 @@ class DiffusionUnetHybridImagePolicy(BaseImagePolicy):
         loss_mask = ~condition_mask
 
         # apply conditioning
+        # e.g. the condition mask is just the observations
+        # so this replaces noisy observations with clean observations again
         noisy_trajectory[condition_mask] = cond_data[condition_mask]
         
         # Predict the noise residual

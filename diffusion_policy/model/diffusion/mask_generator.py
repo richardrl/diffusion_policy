@@ -99,6 +99,7 @@ class LowdimMaskGenerator(ModuleAttrMixin):
 
         mask = obs_mask
         if self.action_visible:
+            # this just returns everything?
             mask = mask | action_mask
         
         return mask
