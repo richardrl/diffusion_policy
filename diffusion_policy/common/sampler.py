@@ -6,34 +6,52 @@ from diffusion_policy.common.replay_buffer import ReplayBuffer
 
 @numba.jit(nopython=True)
 def create_indices(
-    episode_ends:np.ndarray, sequence_length:int, 
+    episode_ends:np.ndarray, sequence_length:int,
     episode_mask: np.ndarray,
     pad_before: int=0, pad_after: int=0,
     debug:bool=True) -> np.ndarray:
-    episode_mask.shape == episode_ends.shape        
+    """
+    This function loops over the episodes and creates tuples of indices that represent sequences within the episodes.
+    Essentially, this performs a convolution-type operation.
+
+    buffer: the buffer represents the raw segment of the data array that we select. It is the sequence *before* padding.
+
+
+    pad_before: what does this do?
+    sequence_length: recall that we take some timesteps for both conditioning and action, NOT up to the episode length.
+    """
+    episode_mask.shape == episode_ends.shape
+
+    # why would we need to max(pad_before, 0)? pad_before should never be negative...
     pad_before = min(max(pad_before, 0), sequence_length-1)
     pad_after = min(max(pad_after, 0), sequence_length-1)
 
     indices = list()
-    for i in range(len(episode_ends)):
-        if not episode_mask[i]:
-            # skip episode
+
+    # episode_ends represents the global indices where each episode ends
+    for episode_idx in range(len(episode_ends)):
+        if not episode_mask[episode_idx]:
+            # skip validation episode
             continue
         start_idx = 0
-        if i > 0:
-            start_idx = episode_ends[i-1]
-        end_idx = episode_ends[i]
+        if episode_idx > 0:
+            start_idx = episode_ends[episode_idx-1]
+        end_idx = episode_ends[episode_idx]
         episode_length = end_idx - start_idx
         
         min_start = -pad_before
         max_start = episode_length - sequence_length + pad_after
         
         # range stops one idx before end
+        # idx is a local index relative to the sequence
         for idx in range(min_start, max_start+1):
+            # the below line indicates when we have a negative start index, it is not considered in the buffer...
             buffer_start_idx = max(idx, 0) + start_idx
             buffer_end_idx = min(idx+sequence_length, episode_length) + start_idx
             start_offset = buffer_start_idx - (idx+start_idx)
             end_offset = (idx+sequence_length+start_idx) - buffer_end_idx
+
+            # the sample start and end idxs define where the valid data is in a padded segment
             sample_start_idx = 0 + start_offset
             sample_end_idx = sequence_length - end_offset
             if debug:
@@ -55,6 +73,8 @@ def get_val_mask(n_episodes, val_ratio, seed=0):
     # have at least 1 episode for validation, and at least 1 episode for train
     n_val = min(max(1, round(n_episodes * val_ratio)), n_episodes-1)
     rng = np.random.default_rng(seed=seed)
+
+    # generate a bunch of episode indices that are designated to be used for validation
     val_idxs = rng.choice(n_episodes, size=n_val, replace=False)
     val_mask[val_idxs] = True
     return val_mask
@@ -87,6 +107,8 @@ class SequenceSampler:
         """
         key_first_k: dict str: int
             Only take first k data from these keys (to improve perf)
+
+        episode_mask: the mask over which episodes are training (versus val)
         """
 
         super().__init__()
@@ -99,7 +121,7 @@ class SequenceSampler:
             episode_mask = np.ones(episode_ends.shape, dtype=bool)
 
         if np.any(episode_mask):
-            indices = create_indices(episode_ends, 
+            indices = create_indices(episode_ends,
                 sequence_length=sequence_length, 
                 pad_before=pad_before, 
                 pad_after=pad_after,
@@ -116,6 +138,8 @@ class SequenceSampler:
         self.sequence_length = sequence_length
         self.replay_buffer = replay_buffer
         self.key_first_k = key_first_k
+        print("key first k")
+        print(self.key_first_k)
     
     def __len__(self):
         return len(self.indices)
@@ -123,6 +147,7 @@ class SequenceSampler:
     def sample_sequence(self, idx):
         buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx \
             = self.indices[idx]
+
         result = dict()
         for key in self.keys:
             input_arr = self.replay_buffer[key]
@@ -143,6 +168,8 @@ class SequenceSampler:
                     import pdb; pdb.set_trace()
             data = sample
             if (sample_start_idx > 0) or (sample_end_idx < self.sequence_length):
+                import pdb
+                pdb.set_trace()
                 data = np.zeros(
                     shape=(self.sequence_length,) + input_arr.shape[1:],
                     dtype=input_arr.dtype)

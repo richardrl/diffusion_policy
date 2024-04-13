@@ -98,8 +98,6 @@ class ReplayBuffer:
         for key, value in root['data'].items():
             assert(value.shape[0] == root['meta']['episode_ends'][-1])
         self.root = root
-        import pdb
-        pdb.set_trace()
     
     # ============= create constructors ===============
     @classmethod
@@ -438,7 +436,10 @@ class ReplayBuffer:
     @property
     def episode_lengths(self):
         ends = self.episode_ends[:]
+        # inserts a 0 at the beginning
         ends = np.insert(ends, 0, 0)
+
+        # gets all consecutive differences
         lengths = np.diff(ends)
         return lengths
 

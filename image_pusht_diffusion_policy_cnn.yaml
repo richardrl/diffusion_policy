@@ -9,7 +9,7 @@ checkpoint:
     monitor_key: test_mean_score
 dataloader:
   batch_size: 64
-  num_workers: 8
+  num_workers: 0
   persistent_workers: false
   pin_memory: true
   shuffle: true
