@@ -15,7 +15,7 @@ def create_indices(
     Essentially, this performs a convolution-type operation.
 
     buffer: the buffer represents the raw segment of the data array that we select. It is the sequence *before* padding.
-
+    sample_start_idx, sample_end_idx:
 
     pad_before: what does this do?
     sequence_length: recall that we take some timesteps for both conditioning and action, NOT up to the episode length.
@@ -51,7 +51,8 @@ def create_indices(
             start_offset = buffer_start_idx - (idx+start_idx)
             end_offset = (idx+sequence_length+start_idx) - buffer_end_idx
 
-            # the sample start and end idxs define where the valid data is in a padded segment
+            # the sample start and end idxs define where the actual sequence starts with respect to
+            # the boundaries of the padded sequence
             sample_start_idx = 0 + start_offset
             sample_end_idx = sequence_length - end_offset
             if debug:
@@ -168,11 +169,15 @@ class SequenceSampler:
                     import pdb; pdb.set_trace()
             data = sample
             if (sample_start_idx > 0) or (sample_end_idx < self.sequence_length):
-                import pdb
-                pdb.set_trace()
+                # this block PADS the sequence to be sequence length
+                # instead of zero-padding, it pads with the first and last frame
                 data = np.zeros(
                     shape=(self.sequence_length,) + input_arr.shape[1:],
                     dtype=input_arr.dtype)
+
+                # we pad up to sequence length with the first frame
+                # this is allowed because we are doing position control
+                # otherwise it would be incorrect
                 if sample_start_idx > 0:
                     data[:sample_start_idx] = sample[0]
                 if sample_end_idx < self.sequence_length:
