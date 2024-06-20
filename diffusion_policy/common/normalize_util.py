@@ -1,5 +1,5 @@
 from diffusion_policy.model.common.normalizer import SingleFieldLinearNormalizer
-from diffusion_policy.common.pytorch_util import dict_apply, dict_apply_reduce, dict_apply_split
+from diffusion_policy.common.pytorch_util import dict_apply_reduce, dict_apply_split
 import numpy as np
 
 
@@ -213,11 +213,3 @@ def robomimic_abs_action_only_dual_arm_normalizer_from_stat(stat):
     )
 
 
-def array_to_stats(arr: np.ndarray):
-    stat = {
-        'min': np.min(arr, axis=0),
-        'max': np.max(arr, axis=0),
-        'mean': np.mean(arr, axis=0),
-        'std': np.std(arr, axis=0)
-    }
-    return stat

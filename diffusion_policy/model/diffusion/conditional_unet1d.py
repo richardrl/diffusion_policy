@@ -51,13 +51,23 @@ class ConditionalResidualBlock1D(nn.Module):
             returns:
             out : [ batch_size x out_channels x horizon ]
         '''
+
+        # x is the noise vector
+        # batch_size, 51, horizon
         out = self.blocks[0](x)
+
+        # -> batch_size, global_cond_hidden_dim, 1
         embed = self.cond_encoder(cond)
+
         if self.cond_predict_scale:
             embed = embed.reshape(
                 embed.shape[0], 2, self.out_channels, 1)
             scale = embed[:,0,...]
             bias = embed[:,1,...]
+
+            # this is the FiLM embedding technique
+            # scale and bias come from global conditioning
+            # out comes from noise blocks
             out = scale * out + bias
         else:
             out = out + embed

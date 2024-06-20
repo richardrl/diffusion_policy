@@ -71,6 +71,7 @@ class MultiImageObsEncoder(ModuleAttrMixin):
                 
                 # configure resize
                 input_shape = shape
+                assert shape[0] == 3 or shape[0]==4, "ln74" # channel dimension first
                 this_resizer = nn.Identity()
                 if resize_shape is not None:
                     if isinstance(resize_shape, dict):
@@ -128,6 +129,7 @@ class MultiImageObsEncoder(ModuleAttrMixin):
         batch_size = None
         features = list()
         # process rgb input
+        print("ln132")
         if self.share_rgb_model:
             # pass all rgb obs to rgb model
             imgs = list()
@@ -143,6 +145,7 @@ class MultiImageObsEncoder(ModuleAttrMixin):
             # (N*B,C,H,W)
             imgs = torch.cat(imgs, dim=0)
             # (N*B,D)
+            # this is the resnet encoder
             feature = self.key_model_map['rgb'](imgs)
             # (N,B,D)
             feature = feature.reshape(-1,batch_size,*feature.shape[1:])
@@ -159,12 +162,16 @@ class MultiImageObsEncoder(ModuleAttrMixin):
                     batch_size = img.shape[0]
                 else:
                     assert batch_size == img.shape[0]
-                assert img.shape[1:] == self.key_shape_map[key]
+                assert img.shape[1:] == self.key_shape_map[key], (img.shape, self.key_shape_map[key])
+
+                # B*T, 3, H, W
+                # we need to increase a channel
                 img = self.key_transform_map[key](img)
                 feature = self.key_model_map[key](img)
                 features.append(feature)
-        
+
         # process lowdim input
+        print("starting low dim")
         for key in self.low_dim_keys:
             data = obs_dict[key]
             if batch_size is None:
@@ -175,6 +182,7 @@ class MultiImageObsEncoder(ModuleAttrMixin):
             features.append(data)
         
         # concatenate all features
+        print("ln183")
         result = torch.cat(features, dim=-1)
         return result
     
@@ -183,6 +191,8 @@ class MultiImageObsEncoder(ModuleAttrMixin):
         example_obs_dict = dict()
         obs_shape_meta = self.shape_meta['obs']
         batch_size = 1
+        import pdb
+        pdb.set_trace()
         for key, attr in obs_shape_meta.items():
             shape = tuple(attr['shape'])
             this_obs = torch.zeros(

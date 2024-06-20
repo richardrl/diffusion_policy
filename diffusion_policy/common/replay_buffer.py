@@ -202,6 +202,7 @@ class ReplayBuffer:
                         source=value, dest=data_group, name=key,
                         chunks=cks, compressor=cpr, if_exists=if_exists
                     )
+
         buffer = cls(root=root)
         return buffer
     
@@ -219,7 +220,8 @@ class ReplayBuffer:
             print('backend argument is deprecated!')
             store = None
         group = zarr.open(os.path.expanduser(zarr_path), 'r')
-        return cls.copy_from_store(src_store=group.store, store=store, 
+
+        return cls.copy_from_store(src_store=group.store, store=store,
             keys=keys, chunks=chunks, compressors=compressors, 
             if_exists=if_exists, **kwargs)
 

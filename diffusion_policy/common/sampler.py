@@ -43,7 +43,7 @@ def create_indices(
             indices.append([
                 buffer_start_idx, buffer_end_idx, 
                 sample_start_idx, sample_end_idx])
-    indices = np.array(indices)
+    indices = np.array(indices).astype(np.uint64)
     return indices
 
 
@@ -106,6 +106,7 @@ class SequenceSampler:
                 episode_mask=episode_mask
                 )
         else:
+            print("No episode mask, no validation. Is this correct??")
             indices = np.zeros((0,4), dtype=np.int64)
 
         # (buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx)

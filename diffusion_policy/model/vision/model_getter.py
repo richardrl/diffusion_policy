@@ -12,6 +12,7 @@ def get_resnet(name, weights=None, **kwargs):
 
     func = getattr(torchvision.models, name)
     resnet = func(weights=weights, **kwargs)
+
     resnet.fc = torch.nn.Identity()
     return resnet
 

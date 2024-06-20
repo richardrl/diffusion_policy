@@ -22,6 +22,7 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
             n_obs_steps,
             num_inference_steps=None,
             obs_as_global_cond=True,
+             actions_as_global_cond=True,
             diffusion_step_embed_dim=256,
             down_dims=(256,512,1024),
             kernel_size=5,
@@ -73,6 +74,7 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
         self.n_action_steps = n_action_steps
         self.n_obs_steps = n_obs_steps
         self.obs_as_global_cond = obs_as_global_cond
+        self.actions_as_global_cond = actions_as_global_cond
         self.kwargs = kwargs
 
         if num_inference_steps is None:
@@ -146,6 +148,7 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
             # condition through global feature
             this_nobs = dict_apply(nobs, lambda x: x[:,:To,...].reshape(-1,*x.shape[2:]))
             nobs_features = self.obs_encoder(this_nobs)
+
             # reshape back to B, Do
             global_cond = nobs_features.reshape(B, -1)
             # empty data for action
@@ -192,8 +195,13 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
     def compute_loss(self, batch):
         # normalize input
         assert 'valid_mask' not in batch
+        # TODO: check this...
         nobs = self.normalizer.normalize(batch['obs'])
         nactions = self.normalizer['action'].normalize(batch['action'])
+        # normalized_batch = self.normalizer.normalize(batch)
+        # nobs = normalized_batch['obs']
+        # nactions = normalized_batch['action']
+
         batch_size = nactions.shape[0]
         horizon = nactions.shape[1]
 
@@ -204,9 +212,10 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
         cond_data = trajectory
         if self.obs_as_global_cond:
             # reshape B, T, ... to B*T
-            this_nobs = dict_apply(nobs, 
-                lambda x: x[:,:self.n_obs_steps,...].reshape(-1,*x.shape[2:]))
-            nobs_features = self.obs_encoder(this_nobs)
+            # TODO: check this, temporarily disabling for my code...
+            # this_nobs = dict_apply(nobs,
+            #     lambda x: x[:,:self.n_obs_steps,...].reshape(-1,*x.shape[2:]))
+            nobs_features = self.obs_encoder(nobs)
             # reshape back to B, Do
             global_cond = nobs_features.reshape(batch_size, -1)
         else:

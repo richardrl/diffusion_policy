@@ -7,6 +7,16 @@ def dict_apply(
         x: Dict[str, torch.Tensor], 
         func: Callable[[torch.Tensor], torch.Tensor]
         ) -> Dict[str, torch.Tensor]:
+    """
+    Applies function to each leaf value of the dictionary
+
+    Args:
+        x:
+        func:
+
+    Returns:
+
+    """
     result = dict()
     for key, value in x.items():
         if isinstance(value, dict):

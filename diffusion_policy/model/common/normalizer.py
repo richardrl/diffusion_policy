@@ -23,9 +23,10 @@ class LinearNormalizer(DictOfTensorMixin):
         range_eps=1e-4,
         fit_offset=True):
         if isinstance(data, dict):
+            assert isinstance(last_n_dims, dict)
             for key, value in data.items():
-                self.params_dict[key] =  _fit(value, 
-                    last_n_dims=last_n_dims,
+                self.params_dict[key] = _fit(value,
+                    last_n_dims=last_n_dims[key],
                     dtype=dtype,
                     mode=mode,
                     output_max=output_max,
@@ -33,7 +34,7 @@ class LinearNormalizer(DictOfTensorMixin):
                     range_eps=range_eps,
                     fit_offset=fit_offset)
         else:
-            self.params_dict['_default'] = _fit(data, 
+            self.params_dict['_default'] = _fit(data,
                     last_n_dims=last_n_dims,
                     dtype=dtype,
                     mode=mode,
@@ -48,7 +49,7 @@ class LinearNormalizer(DictOfTensorMixin):
     def __getitem__(self, key: str):
         return SingleFieldLinearNormalizer(self.params_dict[key])
 
-    def __setitem__(self, key: str , value: 'SingleFieldLinearNormalizer'):
+    def __setitem__(self, key: str, value: 'SingleFieldLinearNormalizer'):
         self.params_dict[key] = value.params_dict
 
     def _normalize_impl(self, x, forward=True):
@@ -139,9 +140,9 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
         
         # check
         for x in [offset] + list(input_stats_dict.values()):
-            assert x.shape == scale.shape
-            assert x.dtype == scale.dtype
-        
+            assert x.shape == scale.shape, (x.shape, scale.shape)
+            assert x.dtype == scale.dtype, (x.dtype, scale.dtype)
+
         params_dict = nn.ParameterDict({
             'scale': to_tensor(scale),
             'offset': to_tensor(offset),
@@ -178,7 +179,6 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
         return self.normalize(x)
 
 
-
 def _fit(data: Union[torch.Tensor, np.ndarray, zarr.Array],
         last_n_dims=1,
         dtype=torch.float32,
@@ -187,6 +187,21 @@ def _fit(data: Union[torch.Tensor, np.ndarray, zarr.Array],
         output_min=-1.,
         range_eps=1e-4,
         fit_offset=True):
+    """
+
+    Args:
+        data:
+        last_n_dims: These are the feature dimensions (as opposed to batch dimensions) we want to compute statistics over. Useful because we might have arbitrary number of leading batch dimensions.
+        dtype:
+        mode:
+        output_max:
+        output_min:
+        range_eps:
+        fit_offset:
+
+    Returns:
+
+    """
     assert mode in ['limits', 'gaussian']
     assert last_n_dims >= 0
     assert output_max > output_min
@@ -201,8 +216,10 @@ def _fit(data: Union[torch.Tensor, np.ndarray, zarr.Array],
 
     # convert shape
     dim = 1
+
     if last_n_dims > 0:
         dim = np.prod(data.shape[-last_n_dims:])
+
     data = data.reshape(-1,dim)
 
     # compute input stats min max mean std
@@ -269,7 +286,11 @@ def _normalize(x, params, forward=True):
     offset = params['offset']
     x = x.to(device=scale.device, dtype=scale.dtype)
     src_shape = x.shape
-    x = x.reshape(-1, scale.shape[0])
+    try:
+        x = x.reshape(-1, scale.shape[0])
+    except:
+        import pdb
+        pdb.set_trace()
     if forward:
         x = x * scale + offset
     else:
