@@ -438,7 +438,10 @@ class ReplayBuffer:
     @property
     def episode_lengths(self):
         ends = self.episode_ends[:]
+        # inserts a 0 at the beginning
         ends = np.insert(ends, 0, 0)
+
+        # gets all consecutive differences
         lengths = np.diff(ends)
         return lengths
 
