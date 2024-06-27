@@ -135,6 +135,15 @@ class ConditionalUnet1D(nn.Module):
             ),
         ])
 
+        # TODO: answer, for every downmodule,
+        # why do we have two residual blocks then a downsample1d block?
+
+        # resnet:
+        #   in: 22, out: 256, kernel size: 5
+        # resnet2:
+        #   in: 256, out: 256, kernel size: 5
+        # downsample:
+
         down_modules = nn.ModuleList([])
         for ind, (dim_in, dim_out) in enumerate(in_out):
             is_last = ind >= (len(in_out) - 1)
@@ -191,6 +200,8 @@ class ConditionalUnet1D(nn.Module):
         global_cond: (B,global_cond_dim)
         output: (B,T,input_dim)
         """
+
+        # -> B, input_state_dim, Horizon
         sample = einops.rearrange(sample, 'b h t -> b t h')
 
         # 1. time
@@ -203,8 +214,10 @@ class ConditionalUnet1D(nn.Module):
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
         timesteps = timesteps.expand(sample.shape[0])
 
+        # -> B, 256
         global_feature = self.diffusion_step_encoder(timesteps)
 
+        # -> B, 720 = 464 + 256
         if global_cond is not None:
             global_feature = torch.cat([
                 global_feature, global_cond
@@ -219,18 +232,34 @@ class ConditionalUnet1D(nn.Module):
             h_local.append(x)
             x = resnet2(local_cond, global_feature)
             h_local.append(x)
-        
+
+        # x: B, input_dim, Horizon
         x = sample
         h = []
+
+        # note: annotations are for first down_module
         for idx, (resnet, resnet2, downsample) in enumerate(self.down_modules):
+            # x: B, data input_dim = 22, horizon
+            # global_feature: B, 720
+            # -> x: B, conv out_dim = 256, horizon
             x = resnet(x, global_feature)
+
+            # no h_local for now
             if idx == 0 and len(h_local) > 0:
                 x = x + h_local[0]
+
+            # x: B, conv in_dim = 256, horizon
+            # -> x: B, conv out_dim = 256, horizon
             x = resnet2(x, global_feature)
             h.append(x)
+
+            # -> x: B, conv out_dim = 256, horizon/2 = 16
             x = downsample(x)
 
         for mid_module in self.mid_modules:
+            # x: B, 1024, 8
+            # global_feature: B, 720
+            # -> x: B, 1024, 8
             x = mid_module(x, global_feature)
 
         for idx, (resnet, resnet2, upsample) in enumerate(self.up_modules):

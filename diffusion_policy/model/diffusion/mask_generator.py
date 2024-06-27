@@ -60,7 +60,8 @@ class LowdimMaskGenerator(ModuleAttrMixin):
     def forward(self, shape, seed=None):
         device = self.device
         B, T, D = shape
-        assert D == (self.action_dim + self.obs_dim)
+        # if this fails, check that the action dimension is correct from create_zarr script
+        assert D == (self.action_dim + self.obs_dim), (D, self.action_dim, self.obs_dim)
 
         # create all tensors on this device
         rng = torch.Generator(device=device)
