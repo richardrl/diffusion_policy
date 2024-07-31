@@ -24,6 +24,7 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
             obs_as_global_cond=False,
             pred_action_steps_only=False,
             oa_step_convention=False,
+            noise_scheduler2: DDPMScheduler=None,
             # parameters passed to step
             **kwargs):
         super().__init__()
@@ -54,6 +55,7 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
         if num_inference_steps is None:
             num_inference_steps = noise_scheduler.config.num_train_timesteps
         self.num_inference_steps = num_inference_steps
+        self.noise_scheduler2 = noise_scheduler2
     
     # ========= inference  ============
     def conditional_sample(self, 

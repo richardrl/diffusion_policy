@@ -8,6 +8,7 @@ from einops.layers.torch import Rearrange
 from diffusion_policy.model.diffusion.conv1d_components import (
     Downsample1d, Upsample1d, Conv1dBlock)
 from diffusion_policy.model.diffusion.positional_embedding import SinusoidalPosEmb
+import torchvision
 
 logger = logging.getLogger(__name__)
 
@@ -75,17 +76,19 @@ class ConditionalResidualBlock1D(nn.Module):
         out = out + self.residual_conv(x)
         return out
 
-
 class ConditionalUnet1D(nn.Module):
     def __init__(self, 
         input_dim,
         local_cond_dim=None,
         global_cond_dim=None,
         diffusion_step_embed_dim=256,
+        env_step_embed_dim=0,
         down_dims=[256,512,1024],
         kernel_size=3,
         n_groups=8,
-        cond_predict_scale=False
+        cond_predict_scale=False,
+        embed_environment_timesteps=False,
+         n_obs_steps=None,
         ):
         super().__init__()
         all_dims = [input_dim] + list(down_dims)
@@ -98,7 +101,7 @@ class ConditionalUnet1D(nn.Module):
             nn.Mish(),
             nn.Linear(dsed * 4, dsed),
         )
-        cond_dim = dsed
+        cond_dim = dsed + env_step_embed_dim
         if global_cond_dim is not None:
             cond_dim += global_cond_dim
 
@@ -189,10 +192,28 @@ class ConditionalUnet1D(nn.Module):
             "number of parameters: %e", sum(p.numel() for p in self.parameters())
         )
 
+        # global_cond dimension is T_obs * obs_dim
+        # self.environment_step_encoder = PositionalEncoding(global_cond_dim, dropout=0.0, max_len=5000)
+        self.embed_environment_timesteps = embed_environment_timesteps
+        self.n_obs_steps = n_obs_steps
+
+        if embed_environment_timesteps:
+            self.global_cond_encoder = torchvision.ops.MLP(global_cond_dim, [global_cond_dim, global_cond_dim])
+            self.env_step_encoder = nn.Sequential(
+            SinusoidalPosEmb(env_step_embed_dim),
+            nn.Flatten(start_dim=1, end_dim=-1), # B, n_obs_steps, embed_dim -> B, n_obs_steps*embed_dim
+            nn.Linear(self.n_obs_steps*env_step_embed_dim, self.n_obs_steps*env_step_embed_dim), # we need to flatten the time embeddings
+            nn.Mish(),
+            nn.Linear(self.n_obs_steps*env_step_embed_dim, env_step_embed_dim),
+        )
+
+
     def forward(self, 
             sample: torch.Tensor, 
             timestep: Union[torch.Tensor, float, int], 
-            local_cond=None, global_cond=None, **kwargs):
+            local_cond=None, global_cond=None,
+            episode_timesteps=None,
+            **kwargs):
         """
         x: (B,T,input_dim)
         timestep: (B,) or int, diffusion step
@@ -217,11 +238,21 @@ class ConditionalUnet1D(nn.Module):
         # -> B, 256
         global_feature = self.diffusion_step_encoder(timesteps)
 
-        # -> B, 720 = 464 + 256
-        if global_cond is not None:
-            global_feature = torch.cat([
-                global_feature, global_cond
-            ], axis=-1)
+
+        if self.embed_environment_timesteps:
+            # global_cond = self.global_cond_encoder(global_cond)
+
+            env_timestep_cond = self.env_step_encoder(episode_timesteps[:, :self.n_obs_steps])
+            if global_cond is not None:
+                global_feature = torch.cat([
+                    global_feature, env_timestep_cond, global_cond
+                ], axis=-1)
+        else:
+            # -> B, 720 = 464 + 256
+            if global_cond is not None:
+                global_feature = torch.cat([
+                    global_feature, global_cond
+                ], axis=-1)
         
         # encode local features
         h_local = list()
