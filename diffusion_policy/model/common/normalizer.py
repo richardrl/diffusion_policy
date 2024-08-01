@@ -10,6 +10,10 @@ from diffusion_policy.model.common.dict_of_tensor_mixin import DictOfTensorMixin
 
 
 class LinearNormalizer(DictOfTensorMixin):
+    """
+    When given a dictionary of observations,
+    this class searches self.params_dict for a key, value matching the key, value of the dictionary of observations
+    """
     avaliable_modes = ['limits', 'gaussian']
     
     @torch.no_grad()
