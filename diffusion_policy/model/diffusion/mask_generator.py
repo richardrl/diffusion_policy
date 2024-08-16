@@ -59,7 +59,12 @@ class LowdimMaskGenerator(ModuleAttrMixin):
     @torch.no_grad()
     def forward(self, shape, seed=None):
         device = self.device
-        B, T, D = shape
+        try:
+            B, T, D = shape
+        except:
+            print("mask_generator ln65")
+            import pdb
+            pdb.set_trace()
         # if this fails, check that the action dimension is correct from create_zarr script
         assert D == (self.action_dim + self.obs_dim), (D, self.action_dim, self.obs_dim)
 

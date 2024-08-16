@@ -295,6 +295,8 @@ def _normalize(x, params, forward=True):
     x = x.to(device=scale.device, dtype=scale.dtype)
     src_shape = x.shape
     try:
+        # this should work even for the video clips
+        # B, T, C, H, W, but scale.shape[0] == C*H*W
         x = x.reshape(-1, scale.shape[0])
     except:
         import pdb

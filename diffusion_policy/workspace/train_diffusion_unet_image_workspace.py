@@ -29,6 +29,7 @@ from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
 from diffusion_policy.model.diffusion.ema_model import EMAModel
 from diffusion_policy.model.common.lr_scheduler import get_scheduler
 from util import conditional_convert_to_tensor
+from torch.utils.data import WeightedRandomSampler, default_collate
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
@@ -64,21 +65,41 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
         # resume training
         if cfg.training.resume:
-            lastest_ckpt_path = self.get_checkpoint_path()
-            if lastest_ckpt_path.is_file():
-                print(f"Resuming from checkpoint {lastest_ckpt_path}")
-                self.load_checkpoint(path=lastest_ckpt_path)
+            if OmegaConf.select(cfg, "training.checkpoint_path") is not None:
+                latest_ckpt_path = pathlib.Path(cfg.training.checkpoint_path)
+            else:
+                latest_ckpt_path = self.get_checkpoint_path()
+            if latest_ckpt_path.is_file():
+                print(f"Resuming from checkpoint {latest_ckpt_path}")
+                self.load_checkpoint(path=latest_ckpt_path)
 
         # configure dataset
         dataset: BaseImageDataset
         dataset = hydra.utils.instantiate(cfg.task.dataset)
-        # assert isinstance(dataset, BaseImageDataset)
-        train_dataloader = DataLoader(dataset, **cfg.dataloader)
+
+        if cfg.training.pad_before_clip_weight:
+            normal_clip_indices = 1-dataset.sampler.pad_before_indices
+            scaled_pad_before_indices = dataset.sampler.pad_before_indices * cfg.training.pad_before_clip_weight
+            sample_weights = normal_clip_indices + scaled_pad_before_indices
+            sampler = WeightedRandomSampler(sample_weights, len(sample_weights))
+            train_dataloader = DataLoader(dataset, **cfg.dataloader, sampler=sampler)
+        else:
+            # assert isinstance(dataset, BaseImageDataset)
+            train_dataloader = DataLoader(dataset, **cfg.dataloader)
         normalizer = dataset.get_normalizer()
 
         # configure validation dataset
         val_dataset = dataset.get_validation_dataset()
-        val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
+
+        if cfg.training.pad_before_clip_weight:
+            normal_clip_indices = 1-val_dataset.sampler.pad_before_indices
+            scaled_pad_before_indices = val_dataset.sampler.pad_before_indices * cfg.training.pad_before_clip_weight
+            sample_weights = normal_clip_indices + scaled_pad_before_indices
+            sampler = WeightedRandomSampler(sample_weights, len(sample_weights))
+
+            val_dataloader = DataLoader(val_dataset, **cfg.dataloader, sampler=sampler)
+        else:
+            val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
 
         self.model.set_normalizer(normalizer)
         if cfg.training.use_ema:
@@ -252,7 +273,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                         obs_dict = batch['obs']
                         gt_action = batch['action']
                         
-                        result = policy.predict_action(obs_dict)
+                        result = policy.predict_action(obs_dict, debug_batch_dict=batch)
                         pred_action = result['action_pred']
                         mse = torch.nn.functional.mse_loss(pred_action, gt_action)
                         step_log['train_action_mse_error'] = mse.item()
