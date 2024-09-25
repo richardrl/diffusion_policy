@@ -115,18 +115,33 @@ class TransformerForDiffusion(ModuleAttrMixin):
             # causal mask to ensure that attention is only applied to the left in the input sequence
             # torch.nn.Transformer uses additive mask as opposed to multiplicative mask in minGPT
             # therefore, the upper triangle should be -inf and others (including diag) should be 0.
+            # additive mask applies the mask to the score before going into the softmax
             sz = T
             mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
             mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+
+            # register buffer places the tensor on the same device as the model
             self.register_buffer("mask", mask)
             
             if time_as_cond and obs_as_cond:
+                import pdb
+                pdb.set_trace()
+
+                # T_cond is n_obs_steps + 1
+                # T is horizon
+
+                # the size of t and s is horizon x n_obs_steps, a 2D grid
+                # if we index into this 2D grid, t gives the x value and s gives the y value
                 S = T_cond
                 t, s = torch.meshgrid(
                     torch.arange(T),
                     torch.arange(S),
                     indexing='ij'
                 )
+
+                # the mask gives us all timesteps in the horizon where the timestep is beyond the n_obs_steps history, which is in the cond
+                # additionally: recall that S / s contains the first timestep with the time embedding conditioning
+                #
                 mask = t >= (s-1) # add one dimension since time is the first token in cond
                 mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
                 self.register_buffer('memory_mask', mask)
@@ -309,20 +324,29 @@ class TransformerForDiffusion(ModuleAttrMixin):
             # encoder
             cond_embeddings = time_emb
             if self.obs_as_cond:
+                import pdb
+                pdb.set_trace()
                 cond_obs_emb = self.cond_obs_emb(cond)
                 # (B,To,n_emb)
+                # the time embedding cond_embeddings is B, 1, n_embed and must be broadcasted
                 cond_embeddings = torch.cat([cond_embeddings, cond_obs_emb], dim=1)
             tc = cond_embeddings.shape[1]
+
+            # we need a position/time embedding for each horizon index
             position_embeddings = self.cond_pos_emb[
                 :, :tc, :
             ]  # each position maps to a (learnable) vector
+
             x = self.drop(cond_embeddings + position_embeddings)
             x = self.encoder(x)
             memory = x
             # (B,T_cond,n_emb)
             
             # decoder
+            # the below line contains the noisy actions
             token_embeddings = input_emb
+
+            # t is the action horizon
             t = token_embeddings.shape[1]
             position_embeddings = self.pos_emb[
                 :, :t, :

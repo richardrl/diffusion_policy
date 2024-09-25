@@ -64,8 +64,8 @@ class LinearNormalizer(DictOfTensorMixin):
                     params = self.params_dict[key]
                     result[key] = _normalize(value, params, forward=forward)
                 else:
-                    # skip, for example episode timestep
-                    pass
+                    # if no normalize, just pass as identity
+                    result[key] = value
             return result
         else:
             if '_default' not in self.params_dict:

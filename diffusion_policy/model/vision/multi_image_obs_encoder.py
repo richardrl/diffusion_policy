@@ -125,7 +125,7 @@ class MultiImageObsEncoder(ModuleAttrMixin):
         self.low_dim_keys = low_dim_keys
         self.key_shape_map = key_shape_map
 
-    def forward(self, obs_dict):
+    def forward(self, obs_dict, future_obs_dict=None):
         batch_size = None
         features = list()
         # process rgb input
@@ -180,6 +180,12 @@ class MultiImageObsEncoder(ModuleAttrMixin):
                 assert batch_size == data.shape[0]
             assert data.shape[1:] == self.key_shape_map[key]
             features.append(data)
+
+        if future_obs_dict is not None:
+            # TODO: currently only supporting low dim future obs dim
+            # also, hard coding that we just concat the cams
+            import pdb
+            pdb.set_trace()
         
         # concatenate all features
         print("ln183")
@@ -191,8 +197,6 @@ class MultiImageObsEncoder(ModuleAttrMixin):
         example_obs_dict = dict()
         obs_shape_meta = self.shape_meta['obs']
         batch_size = 1
-        import pdb
-        pdb.set_trace()
         for key, attr in obs_shape_meta.items():
             shape = tuple(attr['shape'])
             this_obs = torch.zeros(

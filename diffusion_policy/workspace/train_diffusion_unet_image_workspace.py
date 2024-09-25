@@ -28,7 +28,7 @@ from diffusion_policy.common.json_logger import JsonLogger
 from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
 from diffusion_policy.model.diffusion.ema_model import EMAModel
 from diffusion_policy.model.common.lr_scheduler import get_scheduler
-from util import conditional_convert_to_tensor
+from root_misc_util import conditional_convert_to_tensor
 from torch.utils.data import WeightedRandomSampler, default_collate
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
