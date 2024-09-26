@@ -43,6 +43,7 @@ class DiffusionTransformerHybridImagePolicy(BaseImagePolicy):
             time_as_cond=True,
             obs_as_cond=True,
             pred_action_steps_only=False,
+            future_as_cond=True,
             # parameters passed to step
             **kwargs):
         super().__init__()
@@ -153,7 +154,8 @@ class DiffusionTransformerHybridImagePolicy(BaseImagePolicy):
             causal_attn=causal_attn,
             time_as_cond=time_as_cond,
             obs_as_cond=obs_as_cond,
-            n_cond_layers=n_cond_layers
+            n_cond_layers=n_cond_layers,
+            future_as_cond=future_as_cond
         )
 
         self.obs_encoder = obs_encoder

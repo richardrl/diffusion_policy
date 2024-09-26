@@ -7,6 +7,12 @@ from diffusion_policy.model.common.module_attr_mixin import ModuleAttrMixin
 
 logger = logging.getLogger(__name__)
 
+# we depart from the diffusion policy
+# the context has timesteps from 1...horizon
+# however, the future timesteps do NOT have hand poses and do not have RGB
+# the goal is to predict where we want the hand to go
+
+
 class TransformerForDiffusion(ModuleAttrMixin):
     def __init__(self,
             input_dim: int,
@@ -14,6 +20,7 @@ class TransformerForDiffusion(ModuleAttrMixin):
             horizon: int,
             n_obs_steps: int = None,
             cond_dim: int = 0,
+            future_cond_dim: int = 0,
             n_layer: int = 12,
             n_head: int = 12,
             n_emb: int = 768,
@@ -22,6 +29,7 @@ class TransformerForDiffusion(ModuleAttrMixin):
             causal_attn: bool=False,
             time_as_cond: bool=True,
             obs_as_cond: bool=False,
+            future_as_cond: bool=False,
             n_cond_layers: int = 0
         ) -> None:
         super().__init__()
@@ -38,7 +46,8 @@ class TransformerForDiffusion(ModuleAttrMixin):
         obs_as_cond = cond_dim > 0
         if obs_as_cond:
             assert time_as_cond
-            T_cond += n_obs_steps
+            # T_cond += n_obs_steps
+            T_cond += horizon
 
         # input embedding stem
         self.input_emb = nn.Linear(input_dim, n_emb)
@@ -52,10 +61,15 @@ class TransformerForDiffusion(ModuleAttrMixin):
         if obs_as_cond:
             self.cond_obs_emb = nn.Linear(cond_dim, n_emb)
 
+        if future_as_cond:
+            self.future_cond_obs_emb = nn.Linear(future_cond_dim, n_emb)
+        self.future_as_cond = future_as_cond
+
         self.cond_pos_emb = None
         self.encoder = None
         self.decoder = None
         encoder_only = False
+
         if T_cond > 0:
             self.cond_pos_emb = nn.Parameter(torch.zeros(1, T_cond, n_emb))
             if n_cond_layers > 0:
@@ -72,12 +86,24 @@ class TransformerForDiffusion(ModuleAttrMixin):
                     encoder_layer=encoder_layer,
                     num_layers=n_cond_layers
                 )
+
+                self.future_encoder = nn.TransformerEncoder(
+                    encoder_layer=encoder_layer,
+                    num_layers=n_layer
+                )
             else:
                 self.encoder = nn.Sequential(
                     nn.Linear(n_emb, 4 * n_emb),
                     nn.Mish(),
                     nn.Linear(4 * n_emb, n_emb)
                 )
+
+                self.future_encoder = nn.Sequential(
+                    nn.Linear(n_emb, 4 * n_emb),
+                    nn.Mish(),
+                    nn.Linear(4 * n_emb, n_emb)
+                )
+
             # decoder
             decoder_layer = nn.TransformerDecoderLayer(
                 d_model=n_emb,
@@ -124,9 +150,6 @@ class TransformerForDiffusion(ModuleAttrMixin):
             self.register_buffer("mask", mask)
             
             if time_as_cond and obs_as_cond:
-                import pdb
-                pdb.set_trace()
-
                 # T_cond is n_obs_steps + 1
                 # T is horizon
 
@@ -139,9 +162,11 @@ class TransformerForDiffusion(ModuleAttrMixin):
                     indexing='ij'
                 )
 
-                # the mask gives us all timesteps in the horizon where the timestep is beyond the n_obs_steps history, which is in the cond
-                # additionally: recall that S / s contains the first timestep with the time embedding conditioning
-                #
+                # this mask is a causal mask for cross attention
+                # recall that the target / decoder length is the horizon
+                # and the source / context length is the n_obs_steps
+                # this mask is horizon X n_obs_steps
+                # it says when decoding, each action timestep can only look at the history that's already happened
                 mask = t >= (s-1) # add one dimension since time is the first token in cond
                 mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
                 self.register_buffer('memory_mask', mask)
@@ -285,7 +310,9 @@ class TransformerForDiffusion(ModuleAttrMixin):
     def forward(self, 
         sample: torch.Tensor, 
         timestep: Union[torch.Tensor, float, int], 
-        cond: Optional[torch.Tensor]=None, **kwargs):
+        cond: Optional[torch.Tensor]=None,
+        future_cond: Optional[torch.Tensor]=None,
+        **kwargs):
         """
         x: (B,T,input_dim)
         timestep: (B,) or int, diffusion step
@@ -293,6 +320,8 @@ class TransformerForDiffusion(ModuleAttrMixin):
         output: (B,T,input_dim)
         """
         # 1. time
+
+        # these are diffusion timesteps
         timesteps = timestep
         if not torch.is_tensor(timesteps):
             # TODO: this requires sync between CPU and GPU. So try to pass timesteps as tensors if you can
@@ -324,12 +353,13 @@ class TransformerForDiffusion(ModuleAttrMixin):
             # encoder
             cond_embeddings = time_emb
             if self.obs_as_cond:
-                import pdb
-                pdb.set_trace()
-                cond_obs_emb = self.cond_obs_emb(cond)
                 # (B,To,n_emb)
-                # the time embedding cond_embeddings is B, 1, n_embed and must be broadcasted
+                cond_obs_emb = self.cond_obs_emb(cond)
+
+                # the time embedding gets added to the front of the embedding sequence
                 cond_embeddings = torch.cat([cond_embeddings, cond_obs_emb], dim=1)
+
+            # tc: this is the n_obs_steps
             tc = cond_embeddings.shape[1]
 
             # we need a position/time embedding for each horizon index
@@ -337,20 +367,51 @@ class TransformerForDiffusion(ModuleAttrMixin):
                 :, :tc, :
             ]  # each position maps to a (learnable) vector
 
+            # make sure that each conditioning RGB frame has time
             x = self.drop(cond_embeddings + position_embeddings)
+
             x = self.encoder(x)
-            memory = x
+
+            """
+            Start to construct future embeddings
+            """
+            # future frames
+            cond_embeddings = time_emb
+
+            if self.future_as_cond:
+                future_cond_obs_emb = self.future_cond_obs_emb(future_cond)
+                # the time embedding gets added to the front of the embedding sequence
+                cond_embeddings = torch.cat([cond_embeddings, future_cond_obs_emb], dim=1)
+
+            position_embeddings = self.cond_pos_emb[:, tc:, :]
+
+            future_x = self.drop(cond_embeddings + position_embeddings)
+
+            future_x = self.future_encoder(future_x)
+
+
+            """
+            End construction of future embeddings
+            """
             # (B,T_cond,n_emb)
-            
+            # T_cond is the number of obs steps
+            memory = torch.cat([x, future_x], axis=1)
+
+
             # decoder
             # the below line contains the noisy actions
+            # B, horizon, action_embed_dim
+            # input_emb is the action embedding
             token_embeddings = input_emb
 
             # t is the action horizon
+            # but pos_emb is also created with t
             t = token_embeddings.shape[1]
             position_embeddings = self.pos_emb[
                 :, :t, :
             ]  # each position maps to a (learnable) vector
+
+            # combine the actions with time embeddings
             x = self.drop(token_embeddings + position_embeddings)
             # (B,T,n_emb)
             x = self.decoder(
@@ -360,7 +421,9 @@ class TransformerForDiffusion(ModuleAttrMixin):
                 memory_mask=self.memory_mask
             )
             # (B,T,n_emb)
-        
+
+        import pdb
+        pdb.set_trace()
         # head
         x = self.ln_f(x)
         x = self.head(x)
@@ -440,3 +503,9 @@ def test():
     sample = torch.zeros((4,8,16))
     out = transformer(sample, timestep)
 
+
+
+def unit_test_my_mask():
+    # test if my mask is correctly working
+    # TODO:
+    pass
