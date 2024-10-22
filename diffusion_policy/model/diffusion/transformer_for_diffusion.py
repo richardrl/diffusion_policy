@@ -4,7 +4,8 @@ import torch
 import torch.nn as nn
 from diffusion_policy.model.diffusion.positional_embedding import SinusoidalPosEmb
 from diffusion_policy.model.common.module_attr_mixin import ModuleAttrMixin
-
+from torchvision.ops import MLP
+from model.ntrack_decoder import NTrackTransformerDecoder
 logger = logging.getLogger(__name__)
 
 # we depart from the diffusion policy
@@ -12,32 +13,38 @@ logger = logging.getLogger(__name__)
 # however, the future timesteps do NOT have hand poses and do not have RGB
 # the goal is to predict where we want the hand to go
 
+def convert_boolean_mask_to_additive_mask(mask):
+    mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+    return mask
 
 class TransformerForDiffusion(ModuleAttrMixin):
     def __init__(self,
-            input_dim: int,
-            output_dim: int,
-            horizon: int,
-            n_obs_steps: int = None,
-            cond_dim: int = 0,
-            future_cond_dim: int = 0,
-            n_layer: int = 12,
-            n_head: int = 12,
-            n_emb: int = 768,
-            p_drop_emb: float = 0.1,
-            p_drop_attn: float = 0.1,
-            causal_attn: bool=False,
-            time_as_cond: bool=True,
-            obs_as_cond: bool=False,
-            future_as_cond: bool=False,
-            n_cond_layers: int = 0
-        ) -> None:
+                 input_dim: int,
+                 output_dim: int,
+                 horizon: int,
+                 n_obs_steps: int = None,
+                 cond_dim: int = 0,
+                 future_cond_dim: int = 0,
+                 n_layer: int = 12,
+                 n_head: int = 12,
+                 n_emb: int = 768,
+                 p_drop_emb: float = 0.1,
+                 p_drop_attn: float = 0.1,
+                 causal_attn: bool=False,
+                 time_as_cond: bool=True,
+                 future_as_cond: bool=False,
+                 n_cond_layers: int = 0,
+                 use_hand_collapse_input_emb: bool=False,
+                 use_flatten_hands_2x: bool=True,
+                 unconditional=True,
+                 ) -> None:
         super().__init__()
 
         # compute number of tokens for main trunk and condition encoder
         if n_obs_steps is None:
             n_obs_steps = horizon
-        
+        self.n_obs_steps = n_obs_steps
+        self.unconditional = unconditional
         T = horizon
         T_cond = 1
         if not time_as_cond:
@@ -50,9 +57,47 @@ class TransformerForDiffusion(ModuleAttrMixin):
             T_cond += horizon
 
         # input embedding stem
-        self.input_emb = nn.Linear(input_dim, n_emb)
-        self.pos_emb = nn.Parameter(torch.zeros(1, T, n_emb))
+        if use_hand_collapse_input_emb:
+            # process two hands, with a mask 0 1 dictating whether a hand is included
+            # as well as a positional embedding for L/R
+            # into a fixed sized vector representing 0, 1, 2 hands
+            # make it a small MLP instead of just one linear layer
+            assert (input_dim / 2) % 1 == 0
+            # self.input_emb = nn.Linear(int(input_dim / 2), n_emb)
+            self.input_emb = MLP(
+                in_channels=int(input_dim / 2) + n_emb,
+                hidden_channels=[512, n_emb],
+                activation_layer=torch.nn.Mish
+            )
+
+            self.hand_chilarity_pos_emb = nn.Parameter(torch.zeros(2, n_emb))
+        elif use_flatten_hands_2x:
+            # flattens both hands into one track
+            # embeds each hand with same thing + position
+            self.input_emb = nn.Linear(int(input_dim / 2), n_emb)
+            self.hand_chilarity_pos_emb = nn.Parameter(torch.zeros(2, n_emb))
+        else:
+            # need to take in the hand pos embedding AND the hand joints themselves
+            raise NotImplementedError
+            self.input_emb = nn.Linear(input_dim, n_emb)
+
+        self.use_hand_collapse_input_emb = use_hand_collapse_input_emb
+
+        # flatten_hands_2x
+        # flattens the left and right hands into one track
+        # TODO: use a L/R embedding + a shared time embedding. for now, just doubles the horizon
+        # architecturally:
+        # encoder only architecture. uses cross attention to produce two fixed size embedding (for past RGB and future camera poses) with cross attention,
+        # then concatenates that global vector to each action and does self attention over the actions (encoder only)
+        self.use_flatten_hands_2x = use_flatten_hands_2x
+
+        if self.use_flatten_hands_2x:
+            self.pos_emb = nn.Parameter(torch.zeros(1, 2*T, n_emb))
+        else:
+            self.pos_emb = nn.Parameter(torch.zeros(1, T, n_emb))
         self.drop = nn.Dropout(p_drop_emb)
+
+        self.n_head = n_head
 
         # cond encoder
         self.time_emb = SinusoidalPosEmb(n_emb)
@@ -89,9 +134,19 @@ class TransformerForDiffusion(ModuleAttrMixin):
 
                 self.future_encoder = nn.TransformerEncoder(
                     encoder_layer=encoder_layer,
-                    num_layers=n_layer
+                    num_layers=n_cond_layers
                 )
+
+                if self.use_flatten_hands_2x:
+                    self.action_emb = nn.Linear(42, n_emb)
+
+                    self.action_encoder = nn.TransformerEncoder(
+                        encoder_layer=encoder_layer,
+                        num_layers=n_cond_layers
+                    )
             else:
+                print("ln119 if you do this, you need to rewrite the code to concat the timestep, otherwise it will get erased")
+                raise NotImplementedError
                 self.encoder = nn.Sequential(
                     nn.Linear(n_emb, 4 * n_emb),
                     nn.Mish(),
@@ -114,10 +169,18 @@ class TransformerForDiffusion(ModuleAttrMixin):
                 batch_first=True,
                 norm_first=True # important for stability
             )
-            self.decoder = nn.TransformerDecoder(
-                decoder_layer=decoder_layer,
-                num_layers=n_layer
-            )
+            if self.use_flatten_hands_2x:
+                self.decoder = NTrackTransformerDecoder(
+                    decoder_layer=decoder_layer,
+                    num_layers=n_layer,
+                    num_tracks=3
+                    # device=self.device
+                ).to(self.device)
+            else:
+                self.decoder = nn.TransformerDecoder(
+                    decoder_layer=decoder_layer,
+                    num_layers=n_layer
+                )
         else:
             # encoder only BERT
             encoder_only = True
@@ -142,9 +205,13 @@ class TransformerForDiffusion(ModuleAttrMixin):
             # torch.nn.Transformer uses additive mask as opposed to multiplicative mask in minGPT
             # therefore, the upper triangle should be -inf and others (including diag) should be 0.
             # additive mask applies the mask to the score before going into the softmax
+
+            # 1s are present
+            # 0s are not
+
             sz = T
             mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
-            mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+            mask = convert_boolean_mask_to_additive_mask(mask)
 
             # register buffer places the tensor on the same device as the model
             self.register_buffer("mask", mask)
@@ -178,7 +245,12 @@ class TransformerForDiffusion(ModuleAttrMixin):
 
         # decoder head
         self.ln_f = nn.LayerNorm(n_emb)
-        self.head = nn.Linear(n_emb, output_dim)
+
+        if self.use_flatten_hands_2x:
+            # produce one hand per element
+            self.head = nn.Linear(n_emb, int(output_dim//2))
+        else:
+            self.head = nn.Linear(n_emb, output_dim)
             
         # constants
         self.T = T
@@ -203,7 +275,9 @@ class TransformerForDiffusion(ModuleAttrMixin):
             nn.TransformerDecoder,
             nn.ModuleList,
             nn.Mish,
-            nn.Sequential)
+            nn.Sequential,
+            nn.ReLU,
+            NTrackTransformerDecoder)
         if isinstance(module, (nn.Linear, nn.Embedding)):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if isinstance(module, nn.Linear) and module.bias is not None:
@@ -228,6 +302,9 @@ class TransformerForDiffusion(ModuleAttrMixin):
             torch.nn.init.normal_(module.pos_emb, mean=0.0, std=0.02)
             if module.cond_obs_emb is not None:
                 torch.nn.init.normal_(module.cond_pos_emb, mean=0.0, std=0.02)
+
+            if hasattr(module, "hand_chilarity_pos_emb") and module.hand_chilarity_pos_emb is not None:
+                torch.nn.init.normal_(module.hand_chilarity_pos_emb, mean=0.0, std=0.02)
         elif isinstance(module, ignore_types):
             # no param
             pass
@@ -269,6 +346,10 @@ class TransformerForDiffusion(ModuleAttrMixin):
         no_decay.add("_dummy_variable")
         if self.cond_pos_emb is not None:
             no_decay.add("cond_pos_emb")
+
+        if self.use_hand_collapse_input_emb or self.use_flatten_hands_2x:
+            no_decay.add("hand_chilarity_pos_emb")
+
 
         # validate that we considered every parameter
         param_dict = {pn: p for pn, p in self.named_parameters()}
@@ -312,14 +393,21 @@ class TransformerForDiffusion(ModuleAttrMixin):
         timestep: Union[torch.Tensor, float, int], 
         cond: Optional[torch.Tensor]=None,
         future_cond: Optional[torch.Tensor]=None,
+        hand_present_boolean: Optional[torch.Tensor]=None,
+        action=None,
         **kwargs):
         """
         x: (B,T,input_dim)
         timestep: (B,) or int, diffusion step
         cond: (B,T',cond_dim)
         output: (B,T,input_dim)
+        sample: noisy action
+        action: clean action
         """
         # 1. time
+
+        # for now, do this
+        assert hand_present_boolean is not None
 
         # these are diffusion timesteps
         timesteps = timestep
@@ -330,15 +418,34 @@ class TransformerForDiffusion(ModuleAttrMixin):
             timesteps = timesteps[None].to(sample.device)
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
         timesteps = timesteps.expand(sample.shape[0])
-        time_emb = self.time_emb(timesteps).unsqueeze(1)
+        diffusion_timestep_embedding = self.time_emb(timesteps).unsqueeze(1)
         # (B,1,n_emb)
 
         # process input
-        input_emb = self.input_emb(sample)
+        # these are the actions
 
+        if self.use_hand_collapse_input_emb:
+            assert not self.use_flatten_hands_2x
+            # B, horizon, 84 -> B, horizon, 42 and B, horizon, 42
+            left_sample, right_sample = sample.chunk(2, dim=-1)
+
+            left_input_emb = self.input_emb(torch.cat([self.hand_chilarity_pos_emb[0].unsqueeze(0).unsqueeze(0).expand(left_sample.shape[0], left_sample.shape[1], -1), left_sample], axis=-1))
+
+            right_input_emb = self.input_emb(torch.cat([self.hand_chilarity_pos_emb[1].unsqueeze(0).unsqueeze(0).expand(right_sample.shape[0], right_sample.shape[1], -1), right_sample], axis=-1))
+            # apply hand masking
+            left_input_emb = left_input_emb * hand_present_boolean[:, :, 0].unsqueeze(-1)
+            right_input_emb = right_input_emb * hand_present_boolean[:, :, 1].unsqueeze(-1)
+            input_emb = left_input_emb + right_input_emb
+        elif self.use_flatten_hands_2x:
+            left_sample, right_sample = sample.chunk(2, dim=-1)
+            flattened_sample = torch.cat([left_sample, right_sample], dim=1)
+
+            # effective_batch, 2*horizon, n_emb
+            input_emb = self.input_emb(flattened_sample)
+            # unravel
         if self.encoder_only:
             # BERT
-            token_embeddings = torch.cat([time_emb, input_emb], dim=1)
+            token_embeddings = torch.cat([diffusion_timestep_embedding, input_emb], dim=1)
             t = token_embeddings.shape[1]
             position_embeddings = self.pos_emb[
                 :, :t, :
@@ -351,12 +458,15 @@ class TransformerForDiffusion(ModuleAttrMixin):
             # (B,T,n_emb)
         else:
             # encoder
-            cond_embeddings = time_emb
+            # -> batch, 1, n_embed
+            cond_embeddings = diffusion_timestep_embedding
             if self.obs_as_cond:
+                # cond: effective_batch, n_obs_steps, cond_dim
                 # (B,To,n_emb)
                 cond_obs_emb = self.cond_obs_emb(cond)
 
                 # the time embedding gets added to the front of the embedding sequence
+                # B, To+1, n_emb
                 cond_embeddings = torch.cat([cond_embeddings, cond_obs_emb], dim=1)
 
             # tc: this is the n_obs_steps
@@ -370,22 +480,82 @@ class TransformerForDiffusion(ModuleAttrMixin):
             # make sure that each conditioning RGB frame has time
             x = self.drop(cond_embeddings + position_embeddings)
 
-            x = self.encoder(x)
+            # B, nobssteps, n_embed
+            # TODO: make this only attend to the hands that exist
+            # even without that, should still work now because we have the categorical variable
+
+            # x here is the RGB conditioning
+            if self.use_flatten_hands_2x:
+                # build mask, you can only look (within the nobssteps history) at elements with valid hand booleans
+                # rgb
+                # theres no mask for rgb because we always have rgb
+                x = self.encoder(x)
+
+                # takes in normalized actions and outputs an embedding
+                # embed actions
+                # concatenate diffusion timestep embedding
+                # sum position embedding
+                # drop
+                # mask based on hand boolean
+                # finally action_encode
+
+                # effective_batch, horizon, 84
+                # -> effective_batch, horizon*2, 42
+                # -> effective_batch, n_obs_steps, 42
+                historical_actions = action[:, :self.n_obs_steps]
+
+                flat_act_l, flat_act_r = historical_actions.chunk(2, dim=-1)
+                embedded_actions = self.action_emb(torch.cat([flat_act_l, flat_act_r], dim=1))
+
+                # append the diffusion timestep
+                # -> effective_batch, 1+n_obs_steps*2, d_embed
+                # print("ln507")
+                # print(diffusion_timestep_embedding.shape)
+                # print(embedded_actions.shape)
+                embedded_actions = torch.cat([diffusion_timestep_embedding, embedded_actions], dim=1)
+
+                # add position embeddings plus a hand chilarity embedding
+                # EB, 1+n_obs_steps*2, d_embed
+                new_position_embedding = torch.cat([position_embeddings, position_embeddings[:, 1:, :]], axis=1)
+
+                # add chilarity embeddings
+                new_position_embedding[:, 1:self.n_obs_steps + 1, :] = new_position_embedding[:, 1:self.n_obs_steps + 1, :] + self.hand_chilarity_pos_emb[0].unsqueeze(0).unsqueeze(0)
+                new_position_embedding[:, self.n_obs_steps + 1:, :] = new_position_embedding[:, self.n_obs_steps + 1:, :] + self.hand_chilarity_pos_emb[1].unsqueeze(0).unsqueeze(0)
+
+                embedded_actions = self.drop(embedded_actions + new_position_embedding)
+
+                # -> effective_batch, 1+n_obs_steps*2, d_embed
+
+                # mask: EB, 1+n_obs_steps*2, 1+n_obs_steps*2
+                # each row index queries each column index
+                # -> EB, 1+n_obs_steps*2
+                # -> EB, 1, 1+n_obs_steps*2
+                effective_batch_size = hand_present_boolean.shape[0]
+                src_mask = torch.cat([torch.ones(effective_batch_size, 1).to(self.device), hand_present_boolean[:, :self.n_obs_steps, 0], hand_present_boolean[:, :self.n_obs_steps, 1]], axis=1).unsqueeze(1).expand(-1, 1+self.n_obs_steps*2, -1)
+                
+                # need to scale mask for heads
+                src_mask  =src_mask.repeat(self.n_head, 1, 1).to(self.device)
+                x_action = self.action_encoder(embedded_actions,
+                                               mask=convert_boolean_mask_to_additive_mask(src_mask))
+            else:
+                x = self.encoder(x,
+                             )
 
             """
             Start to construct future embeddings
             """
             # future frames
-            cond_embeddings = time_emb
+            future_cond_embeddings = diffusion_timestep_embedding
 
             if self.future_as_cond:
                 future_cond_obs_emb = self.future_cond_obs_emb(future_cond)
                 # the time embedding gets added to the front of the embedding sequence
-                cond_embeddings = torch.cat([cond_embeddings, future_cond_obs_emb], dim=1)
+                future_cond_embeddings = torch.cat([future_cond_embeddings, future_cond_obs_emb], dim=1)
 
-            position_embeddings = self.cond_pos_emb[:, tc:, :]
+            # add all the future timesteps as position embeddings
+            future_position_embeddings = self.cond_pos_emb[:, tc:, :]
 
-            future_x = self.drop(cond_embeddings + position_embeddings)
+            future_x = self.drop(future_cond_embeddings + future_position_embeddings)
 
             future_x = self.future_encoder(future_x)
 
@@ -393,9 +563,14 @@ class TransformerForDiffusion(ModuleAttrMixin):
             """
             End construction of future embeddings
             """
-            # (B,T_cond,n_emb)
-            # T_cond is the number of obs steps
-            memory = torch.cat([x, future_x], axis=1)
+            if self.use_flatten_hands_2x:
+                memory_rgb = x
+                memory_action = x_action
+                memory_future_camera_pose = future_x
+            else:
+                # (B,T_cond,n_emb)
+                # T_cond is the number of obs steps
+                memory = torch.cat([x, future_x], axis=1)
 
 
             # decoder
@@ -406,6 +581,7 @@ class TransformerForDiffusion(ModuleAttrMixin):
 
             # t is the action horizon
             # but pos_emb is also created with t
+            # position embedding embeds the timesteps
             t = token_embeddings.shape[1]
             position_embeddings = self.pos_emb[
                 :, :t, :
@@ -414,20 +590,94 @@ class TransformerForDiffusion(ModuleAttrMixin):
             # combine the actions with time embeddings
             x = self.drop(token_embeddings + position_embeddings)
             # (B,T,n_emb)
-            x = self.decoder(
-                tgt=x,
-                memory=memory,
-                tgt_mask=self.mask,
-                memory_mask=self.memory_mask
-            )
+
+            """
+            start building masks
+            """
+            if self.use_hand_collapse_input_emb:
+                # the tgt mask should allow quadratic attention amongst all action elements that are valid
+                # zero otherwise...
+                # -> B, horizon
+                hand_present_boolean_solo = torch.logical_or(hand_present_boolean[..., 0], hand_present_boolean[..., 1])
+
+                batch_size = hand_present_boolean_solo.shape[0]
+                horizon = hand_present_boolean_solo.shape[1]
+
+                # unsqueeze the horizon and head dimension
+                # stack the hpbs along the rows
+                # -> B, horizon, horizon
+                mask = hand_present_boolean_solo.unsqueeze(1).expand(-1, horizon, -1)
+
+                # -> B, num_heads, horizon, horizon -> B*num_heads, horizon, horizon
+                mask = mask.unsqueeze(1).expand(-1, self.n_head, -1,  -1).reshape(batch_size*self.n_head, horizon, horizon)
+
+                mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+
+                # the memory mask should allow querying context vectors that are valid, plus the initial diffusion time embedding
+                # -> B, n_obs_steps + 1 for time dimension
+                # nobs_steps = tc - 1
+                # BUT: because we have a lot of future timestep conditioning here, we need to just stick the WHOLE horizon / hand_present_boolean_solo in here
+                base_mem_mask = torch.cat([torch.ones(batch_size, 1).to(self.device), hand_present_boolean_solo], axis=1)
+
+                # -> B, horizon, horizon + 1
+                memory_mask = base_mem_mask.unsqueeze(1).expand(-1, horizon, -1)
+
+                # -> B, num_heads, horizon, horizon + 1 -> B*num_heads, horizon, horizon + 1
+                memory_mask = memory_mask.unsqueeze(1).expand(-1, self.n_head, -1, -1).reshape(batch_size*self.n_head, horizon, horizon+1)
+
+                memory_mask = memory_mask.float().masked_fill(memory_mask == 0, float('-inf')).masked_fill(memory_mask == 1, float(0.0))
+                """
+                stop building masks
+                """
+                x = self.decoder(
+                    tgt=x,
+                    memory=memory,
+                    tgt_mask=mask.clone().detach(),
+                    memory_mask=memory_mask.clone().detach()
+                )
+
+            elif self.use_flatten_hands_2x:
+                # -> effective_batch, 2*horizon
+
+                # just mask out all the inactive hands
+                effective_batch_size = hand_present_boolean.shape[0]
+                horizon = hand_present_boolean.shape[1]
+                tgt_mask = torch.cat([hand_present_boolean[..., 0], hand_present_boolean[..., 1]], axis=1).unsqueeze(1).expand(-1, 2*horizon, -1).repeat(self.n_head, 1, 1).to(self.device)
+
+                # none of the valid queries are allowed to interact with invalid queries during decoding
+                # sa: in this stage, the tgt mask guarantees non-interaction
+                # msa / cross attention: in this stage, invalid queries are allowed to interact with the valid context/memory, but the embeddings they produce keep propagating through success layers without affecting the valid indices
+                # ff
+                memory_rgb_mask = torch.ones(effective_batch_size, 2*horizon, self.n_obs_steps + 1).repeat(self.n_head, 1, 1).to(self.device)
+                memory_action_mask = torch.cat([torch.ones(effective_batch_size, 1).to(self.device), hand_present_boolean[..., :self.n_obs_steps, 0], hand_present_boolean[..., :self.n_obs_steps, 1]], axis=1).unsqueeze(1).expand(-1, 2*horizon, -1).repeat(self.n_head, 1, 1).to(self.device)
+
+                # any query can access the memory
+                memory_future_camera_pose_mask = torch.ones(effective_batch_size, horizon - self.n_obs_steps).unsqueeze(1).expand(-1, 2*horizon, -1).repeat(self.n_head, 1, 1).to(self.device)
+                # for each memory mask, each action can only attend to
+                x = self.decoder(
+                    tgt=x,
+                    tgt_mask=tgt_mask,
+                    memory_list=[memory_rgb, memory_action, memory_future_camera_pose],
+                     memory_mask_list=[convert_boolean_mask_to_additive_mask(memory_rgb_mask), convert_boolean_mask_to_additive_mask(memory_action_mask), convert_boolean_mask_to_additive_mask(memory_future_camera_pose_mask)]
+                )
+            else:
+                raise NotImplementedError
+            # x = self.decoder(
+            #     tgt=x,
+            #     memory=memory,
+            #     tgt_mask=self.mask,
+            #     memory_mask=self.memory_mask
+            # )
             # (B,T,n_emb)
 
-        import pdb
-        pdb.set_trace()
         # head
         x = self.ln_f(x)
         x = self.head(x)
         # (B,T,n_out)
+
+        if self.use_flatten_hands_2x:
+            # -> effective_batch, horizon, 84
+            x = x.reshape(effective_batch_size, horizon, 2, 42).flatten(start_dim=-2, end_dim=-1)
         return x
 
 
