@@ -292,7 +292,7 @@ def _normalize(x, params, forward=True):
         x = torch.from_numpy(x)
     scale = params['scale']
     offset = params['offset']
-    x = x.to(device=scale.device, dtype=scale.dtype)
+    # x = x.to(device=scale.device, dtype=scale.dtype)
     src_shape = x.shape
     try:
         # this should work even for the video clips
@@ -302,9 +302,9 @@ def _normalize(x, params, forward=True):
         import pdb
         pdb.set_trace()
     if forward:
-        x = x * scale + offset
+        x = x * scale.to(x.device) + offset.to(x.device)
     else:
-        x = (x - offset) / scale
+        x = (x - offset.to(x.device)) / scale.to(x.device)
     x = x.reshape(src_shape)
     return x
 

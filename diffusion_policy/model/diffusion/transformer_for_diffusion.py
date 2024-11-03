@@ -35,8 +35,11 @@ class TransformerForDiffusion(ModuleAttrMixin):
                  n_cond_layers: int = 0,
                  use_hand_collapse_input_emb: bool=False,
                  use_flatten_hands_2x: bool=True,
+                 use_2x_horizon: bool=False,
                  unconditional=True,
-                 conditioning_to_use=["rgb", "proprioceptive", "future_camera_pose"]
+                 conditioning_to_use=["rgb", "proprioceptive", "future_camera_pose"],
+                 use_mse_loss=False,
+                 mask_history=True
                  ) -> None:
         super().__init__()
 
@@ -91,11 +94,12 @@ class TransformerForDiffusion(ModuleAttrMixin):
         # encoder only architecture. uses cross attention to produce two fixed size embedding (for past RGB and future camera poses) with cross attention,
         # then concatenates that global vector to each action and does self attention over the actions (encoder only)
         self.use_flatten_hands_2x = use_flatten_hands_2x
+        self.use_2x_horizon = use_2x_horizon
 
-        # if self.use_flatten_hands_2x:
-        #     self.pos_emb = nn.Parameter(torch.zeros(1, 2*T, n_emb))
-        # else:
-        self.pos_emb = nn.Parameter(torch.zeros(1, T, n_emb))
+        if self.use_flatten_hands_2x and self.use_2x_horizon:
+            self.pos_emb = nn.Parameter(torch.zeros(1, 2*T, n_emb))
+        else:
+            self.pos_emb = nn.Parameter(torch.zeros(1, T, n_emb))
         self.drop = nn.Dropout(p_drop_emb)
 
         self.n_head = n_head
@@ -111,19 +115,19 @@ class TransformerForDiffusion(ModuleAttrMixin):
             # rgb embedding
             self.cond_obs_emb = nn.Linear(cond_dim, n_emb)
 
-            if not self.time_as_cond:
+            if not time_as_cond:
                 self.cond_obs_combiner = nn.Linear(n_emb*3, n_emb)
 
         if self.use_flatten_hands_2x and "proprioceptive" in self.conditioning_to_use:
             self.proprioceptive_emb = nn.Linear(42, n_emb)
 
-            if not self.time_as_cond:
+            if not time_as_cond:
                 self.proprioceptive_combiner = nn.Linear(n_emb * 3, n_emb)
 
         if "future_camera_pose" in conditioning_to_use:
             self.future_cond_obs_emb = nn.Linear(future_cond_dim, n_emb)
 
-            if not self.time_as_cond:
+            if not time_as_cond:
                 self.future_cond_obs_combiner = nn.Linear(n_emb * 3, n_emb)
 
         self.cond_pos_emb = None
@@ -300,6 +304,11 @@ class TransformerForDiffusion(ModuleAttrMixin):
             "number of parameters: %e", sum(p.numel() for p in self.parameters())
         )
 
+        self.use_mse_loss = use_mse_loss
+        if use_mse_loss:
+            self.query_param = torch.nn.Parameter(torch.zeros(1, self.horizon*2, n_emb))
+        self.mask_history = mask_history
+
     def _init_weights(self, module):
         ignore_types = (nn.Dropout, 
             SinusoidalPosEmb, 
@@ -343,6 +352,9 @@ class TransformerForDiffusion(ModuleAttrMixin):
             # for str_ in to_instantiate:
             #     if getattr(module, str_) is not None:
             #         torch.nn.init.normal_(getattr(module, str_), mean=0.0, std=0.02)
+
+            if hasattr(module, "query_param") and module.query_param is not None:
+                torch.nn.init.normal_(module.query_param, mean=0.0, std=0.02)
 
             if module.cond_pos_emb is not None:
                 torch.nn.init.normal_(module.cond_pos_emb, mean=0.0, std=0.02)
@@ -391,6 +403,8 @@ class TransformerForDiffusion(ModuleAttrMixin):
         if self.cond_pos_emb is not None:
             no_decay.add("cond_pos_emb")
 
+        if self.use_mse_loss:
+            no_decay.add('query_param')
         if self.use_hand_collapse_input_emb or self.use_flatten_hands_2x:
             no_decay.add("hand_chilarity_pos_emb")
 
@@ -472,6 +486,7 @@ class TransformerForDiffusion(ModuleAttrMixin):
 
         if self.use_hand_collapse_input_emb:
             assert not self.use_flatten_hands_2x
+            assert not self.use_mse_loss
             # B, horizon, 84 -> B, horizon, 42 and B, horizon, 42
             left_sample, right_sample = sample.chunk(2, dim=-1)
 
@@ -483,11 +498,14 @@ class TransformerForDiffusion(ModuleAttrMixin):
             right_input_emb = right_input_emb * hand_present_boolean[:, :, 1].unsqueeze(-1)
             input_emb = left_input_emb + right_input_emb
         elif self.use_flatten_hands_2x:
-            left_sample, right_sample = sample.chunk(2, dim=-1)
-            flattened_sample = torch.cat([left_sample, right_sample], dim=1)
+            if self.use_mse_loss:
+                input_emb = self.query_param.expand(effective_batch_size, -1, -1)
+            else:
+                left_sample, right_sample = sample.chunk(2, dim=-1)
+                flattened_sample = torch.cat([left_sample, right_sample], dim=1)
 
-            # effective_batch, 2*horizon, n_emb
-            input_emb = self.input_emb(flattened_sample)
+                # effective_batch, 2*horizon, n_emb
+                input_emb = self.input_emb(flattened_sample)
             # unravel
         if self.encoder_only:
             # BERT
@@ -526,7 +544,7 @@ class TransformerForDiffusion(ModuleAttrMixin):
                         :, :tc, :
                     ]  # each position maps to a (learnable) vector
 
-                    x = self.drop(cond_obs_emb + cond_position_embeddings)
+                    x = self.drop(cond_embeddings + cond_position_embeddings)
                 else:
                     cond_position_embeddings = self.cond_pos_emb[
                         :, :self.n_obs_steps, :
@@ -579,10 +597,9 @@ class TransformerForDiffusion(ModuleAttrMixin):
                         # print("ln507")
                         # print(diffusion_timestep_embedding.shape)
                         # print(embedded_actions.shape)
-                        # embedded_actions = torch.cat([diffusion_timestep_embedding, embedded_actions], dim=1)
-
-
                         if self.time_as_cond:
+                            embedded_proprioceptive = torch.cat([diffusion_timestep_embedding, embedded_proprioceptive], dim=1)
+
                             # add position embeddings plus a hand chilarity embedding
                             # EB, 1+n_obs_steps*2, d_embed
                             # diffusion timestep embedding, left cond pos embed, right cond pos embed
@@ -612,7 +629,9 @@ class TransformerForDiffusion(ModuleAttrMixin):
                         effective_batch_size = hand_present_boolean.shape[0]
 
                         if self.time_as_cond:
-                            src_mask = torch.cat([torch.ones(effective_batch_size, 1).to(self.device), hand_present_boolean[:, :self.n_obs_steps, 0], hand_present_boolean[:, :self.n_obs_steps, 1]], axis=1).unsqueeze(1).expand(-1, 1+self.n_obs_steps*2, -1)
+                            src_mask = torch.cat([torch.ones(effective_batch_size, 1).to(self.device),
+                                                  hand_present_boolean[:, :self.n_obs_steps, 0],
+                                                  hand_present_boolean[:, :self.n_obs_steps, 1]], axis=1).unsqueeze(1).expand(-1, 1+self.n_obs_steps*2, -1)
                         else:
                             src_mask = torch.cat([hand_present_boolean[:, :self.n_obs_steps, 0], hand_present_boolean[:, :self.n_obs_steps, 1]], axis=1).unsqueeze(1).expand(-1, self.n_obs_steps*2, -1)
 
@@ -687,10 +706,14 @@ class TransformerForDiffusion(ModuleAttrMixin):
             # combine the actions with time embeddings
             if self.unconditional or self.use_flatten_hands_2x:
                 # remember: in the flatten 2x case, we have 2*horizon actions
-                x = self.drop(token_embeddings +
-                              torch.cat([position_embeddings, position_embeddings], axis=1) +
-                              # diffusion_timestep_embedding +
-                              torch.cat([self.hand_chilarity_pos_emb[0].tile(self.horizon, 1), self.hand_chilarity_pos_emb[1].tile(self.horizon, 1)], axis=0).unsqueeze(0))
+                if self.use_2x_horizon:
+                    x = self.drop(token_embeddings +
+                                  position_embeddings)
+                else:
+                    x = self.drop(token_embeddings +
+                                  torch.cat([position_embeddings, position_embeddings], axis=1) +
+                                  # diffusion_timestep_embedding +
+                                  torch.cat([self.hand_chilarity_pos_emb[0].tile(self.horizon, 1), self.hand_chilarity_pos_emb[1].tile(self.horizon, 1)], axis=0).unsqueeze(0))
                 assert not torch.any(torch.isnan(x))
             else:
                 raise NotImplementedError
@@ -751,7 +774,13 @@ class TransformerForDiffusion(ModuleAttrMixin):
 
                 # notice: this is of size HORIZON
                 # so we try to reconstruct existing hands with this objective too
-                tgt_mask = torch.cat([hand_present_boolean[..., 0], hand_present_boolean[..., 1]], axis=1).unsqueeze(1).expand(-1, 2*horizon, -1).repeat(self.n_head, 1, 1).to(self.device)
+                if self.mask_history:
+                    tgt_mask = torch.cat([torch.zeros(effective_batch_size, self.n_obs_steps).to(self.device),
+                                          hand_present_boolean[..., 0][:, self.n_obs_steps:],
+                                          torch.zeros(effective_batch_size, self.n_obs_steps).to(self.device),
+                                          hand_present_boolean[..., 1][:, self.n_obs_steps:]], axis=1).unsqueeze(1).expand(-1, 2*horizon, -1).repeat(self.n_head, 1, 1).to(self.device)
+                else:
+                    tgt_mask = torch.cat([hand_present_boolean[..., 0], hand_present_boolean[..., 1]], axis=1).unsqueeze(1).expand(-1, 2*horizon, -1).repeat(self.n_head, 1, 1).to(self.device)
 
                 if self.unconditional:
                     # only do self attention on actions
@@ -795,9 +824,10 @@ class TransformerForDiffusion(ModuleAttrMixin):
                             memory_mask_list.append(memory_action_mask)
                         elif key == "future_camera_pose":
                             memory_future_camera_pose = future_x
-
-
-                            memory_future_camera_pose_mask = torch.ones(effective_batch_size, horizon - self.n_obs_steps).unsqueeze(1).expand(-1, 2*horizon, -1).repeat(self.n_head, 1, 1).to(self.device)
+                            if self.time_as_cond:
+                                memory_future_camera_pose_mask = torch.ones(effective_batch_size, horizon - self.n_obs_steps + 1).unsqueeze(1).expand(-1, 2*horizon, -1).repeat(self.n_head, 1, 1).to(self.device)
+                            else:
+                                memory_future_camera_pose_mask = torch.ones(effective_batch_size, horizon - self.n_obs_steps).unsqueeze(1).expand(-1, 2*horizon, -1).repeat(self.n_head, 1, 1).to(self.device)
                             memory_list.append(memory_future_camera_pose)
                             memory_mask_list.append(memory_future_camera_pose_mask)
 
