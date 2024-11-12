@@ -589,7 +589,10 @@ class TransformerForDiffusion(ModuleAttrMixin):
                         # -> effective_batch, n_obs_steps, 42
                         historical_actions = action[:, :self.n_obs_steps]
 
+                        # we expect the left and right actions to be concatenated here, and they get chunked
+                        # if there are only actions for one arm, this doesn't make sense
                         flat_act_l, flat_act_r = historical_actions.chunk(2, dim=-1)
+                        assert len(action.shape) == 3
                         embedded_proprioceptive = self.proprioceptive_emb(torch.cat([flat_act_l, flat_act_r], dim=1))
 
                         # append the diffusion timestep

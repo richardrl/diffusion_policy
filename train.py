@@ -45,7 +45,10 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 )
 
 def main(cfg: OmegaConf):
-    ddp_setup()
+    try:
+        ddp_setup()
+    except:
+        print("No torch run detected")
     # resolve immediately so all the ${now:} resolvers
     # will use the same time.
     OmegaConf.resolve(cfg)
