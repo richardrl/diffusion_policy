@@ -30,6 +30,15 @@ from diffusion_policy.model.diffusion.ema_model import EMAModel
 from diffusion_policy.model.common.lr_scheduler import get_scheduler
 from root_misc_util import conditional_convert_to_tensor
 from torch.utils.data import WeightedRandomSampler, default_collate
+from omegaconf import DictConfig, OmegaConf
+
+def recursive_instantiate(dict_to_use):
+    for k, v in dict_to_use.items():
+        if isinstance(v, DictConfig):
+            dict_to_use[k] = recursive_instantiate(v)
+
+    if "_target_" in dict_to_use.keys():
+        return hydra.utils.instantiate(dict_to_use)
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
@@ -46,7 +55,13 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         random.seed(seed)
 
         # configure model
+        # need recursive for old hydra
+
+        # try:
         self.model: DiffusionUnetImagePolicy = hydra.utils.instantiate(cfg.policy)
+        # except:
+        # self.model = recursive_instantiate(cfg.policy)
+
 
         self.ema_model: DiffusionUnetImagePolicy = None
         if cfg.training.use_ema:
