@@ -20,7 +20,7 @@ def convert_boolean_mask_to_additive_mask(mask):
 class TransformerForDiffusion(ModuleAttrMixin):
     def __init__(self,
                  input_dim: int,
-                 output_dim: int,
+                 output_dim: int, # this is the action dim of a single hand
                  horizon: int,
                  n_obs_steps: int = None,
                  cond_dim: int = 0,
@@ -43,6 +43,7 @@ class TransformerForDiffusion(ModuleAttrMixin):
                  ) -> None:
         super().__init__()
 
+        self.output_dim = output_dim
         # compute number of tokens for main trunk and condition encoder
         if n_obs_steps is None:
             n_obs_steps = horizon
@@ -119,7 +120,7 @@ class TransformerForDiffusion(ModuleAttrMixin):
                 self.cond_obs_combiner = nn.Linear(n_emb*3, n_emb)
 
         if self.use_flatten_hands_2x and "proprioceptive" in self.conditioning_to_use:
-            self.proprioceptive_emb = nn.Linear(42, n_emb)
+            self.proprioceptive_emb = nn.Linear(int(output_dim//2), n_emb)
 
             if not time_as_cond:
                 self.proprioceptive_combiner = nn.Linear(n_emb * 3, n_emb)
@@ -865,7 +866,7 @@ class TransformerForDiffusion(ModuleAttrMixin):
 
         if self.use_flatten_hands_2x:
             # -> effective_batch, horizon, 84
-            x = x.reshape(effective_batch_size, horizon, 2, 42).flatten(start_dim=-2, end_dim=-1)
+            x = x.reshape(effective_batch_size, horizon, 2, int(self.output_dim//2)).flatten(start_dim=-2, end_dim=-1)
         return x
 
 

@@ -30,6 +30,8 @@ from diffusion_policy.model.diffusion.ema_model import EMAModel
 from diffusion_policy.model.common.lr_scheduler import get_scheduler
 from root_misc_util import conditional_convert_to_tensor
 from torch.utils.data import WeightedRandomSampler, default_collate
+import copy
+torch.set_float32_matmul_precision('medium')  # or 'high'
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
@@ -62,6 +64,20 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
     def run(self):
         cfg = copy.deepcopy(self.cfg)
+
+        if cfg.training.preload_path:
+            preload_model = torch.load(cfg.training.preload_path)
+
+            current_keys = [_ for _ in self.model.state_dict().keys() if "obs_encoder" in _]
+            preload_keys = ["module." + _ for _ in current_keys]
+
+            # convert hte keys
+            state_dict_to_load = copy.deepcopy(self.model.state_dict())
+            for key_idx, key in enumerate(preload_keys):
+                state_dict_to_load[current_keys[key_idx]] = preload_model['state_dicts']['model'][preload_keys[key_idx]]
+            # load all weights of the vision encoder
+            # self.model.obs_encoder.key_model_map['img'].load_state_dict(state_dict_to_load)
+            self.model.load_state_dict(state_dict_to_load)
 
         # resume training
         if cfg.training.resume:
@@ -141,7 +157,10 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         wandb.config.update(
             {
                 "output_dir": self.output_dir,
-            }
+                "slurm_job_id": os.environ.get("SLURM_JOB_ID", ""),
+                "slurm_mem": os.environ.get("SLURM_MEM_PER_NODE", "")
+            },
+            allow_val_change=True
         )
 
         # configure checkpoint
@@ -180,7 +199,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                     self.model.obs_encoder.requires_grad_(False)
 
                 train_losses = list()
-                with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}", 
+                with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}",
                         leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                     for batch_idx, batch in enumerate(tepoch):
                         # device transfer
@@ -201,7 +220,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                             self.optimizer.step()
                             self.optimizer.zero_grad()
                             lr_scheduler.step()
-                        
+
                         # update ema
                         if cfg.training.use_ema:
                             ema.step(self.model)
@@ -245,24 +264,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                 #     # log all
                 #     step_log.update(runner_log)
 
-                # run validation
-                if (self.epoch % cfg.training.val_every) == 0:
-                    with torch.no_grad():
-                        val_losses = list()
-                        with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 
-                                leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
-                            for batch_idx, batch in enumerate(tepoch):
-                                batch = dict_apply(batch, lambda inp: conditional_convert_to_tensor(device, inp))
-                                loss = self.model.compute_loss(batch)
-                                val_losses.append(loss)
-                                if (cfg.training.max_val_steps is not None) \
-                                    and batch_idx >= (cfg.training.max_val_steps-1):
-                                    break
-                        if len(val_losses) > 0:
-                            val_loss = torch.mean(torch.tensor(val_losses)).item()
-                            # log epoch average validation loss
-                            step_log['val_loss'] = val_loss
-
+                # batch = next(iter(train_dataloader))
                 # run diffusion sampling on a training batch
                 if (self.epoch % cfg.training.sample_every) == 0:
                     with torch.no_grad():
@@ -272,18 +274,50 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
                         obs_dict = batch['obs']
                         gt_action = batch['action']
-                        
+
+                        print("ln285 predict action")
                         result = policy.predict_action(obs_dict, debug_batch_dict=batch)
                         pred_action = result['action_pred']
                         mse = torch.nn.functional.mse_loss(pred_action, gt_action)
                         step_log['train_action_mse_error'] = mse.item()
-                        del batch
-                        del obs_dict
-                        del gt_action
-                        del result
-                        del pred_action
-                        del mse
-                
+                        print("ln290 finish")
+                        # del batch
+                        # del obs_dict
+                        # del gt_action
+                        # del result
+                        # del pred_action
+                        # del mse
+
+                # run validation
+                if (self.epoch % cfg.training.val_every) == 0:
+                    with torch.no_grad():
+                        val_losses = list()
+                        val_mse_errors = list()
+
+                        with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}",
+                                leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
+                            for batch_idx, batch in enumerate(tepoch):
+                                batch = dict_apply(batch, lambda inp: conditional_convert_to_tensor(device, inp))
+                                loss = self.model.compute_loss(batch)
+                                val_losses.append(loss)
+                                if (cfg.training.max_val_steps is not None) \
+                                    and batch_idx >= (cfg.training.max_val_steps-1):
+                                    break
+
+                                obs_dict = batch['obs']
+                                gt_action = batch['action']
+
+                                result = policy.predict_action(obs_dict, debug_batch_dict=batch)
+                                pred_action = result['action_pred']
+                                mse = torch.nn.functional.mse_loss(pred_action, gt_action)
+                                val_mse_errors.append(mse)
+                        if len(val_losses) > 0:
+                            assert len(val_mse_errors) > 0
+                            val_loss = torch.mean(torch.tensor(val_losses)).item()
+                            # log epoch average validation loss
+                            step_log['val_loss'] = val_loss
+                            step_log['val_action_mse_error'] = torch.mean(torch.tensor(val_mse_errors)).item()
+
                 # checkpoint
                 if (self.epoch % cfg.training.checkpoint_every) == 0:
                     # checkpointing
