@@ -32,6 +32,8 @@ from root_misc_util import conditional_convert_to_tensor
 from torch.utils.data import WeightedRandomSampler, default_collate
 import copy
 torch.set_float32_matmul_precision('medium')  # or 'high'
+from omegaconf import DictConfig, OmegaConf
+
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
@@ -48,7 +50,13 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         random.seed(seed)
 
         # configure model
+        # need recursive for old hydra
+
+        # try:
         self.model: DiffusionUnetImagePolicy = hydra.utils.instantiate(cfg.policy)
+        # except:
+        # self.model = recursive_instantiate(cfg.policy)
+
 
         self.ema_model: DiffusionUnetImagePolicy = None
         if cfg.training.use_ema:
