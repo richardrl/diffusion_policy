@@ -73,13 +73,13 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
     def run(self):
         cfg = copy.deepcopy(self.cfg)
 
-        if cfg.training.preload_path:
+        if OmegaConf.select(cfg, "training.preload_path") is not None and cfg.training.preload_path:
             preload_model = torch.load(cfg.training.preload_path)
 
             current_keys = [_ for _ in self.model.state_dict().keys() if "obs_encoder" in _]
             preload_keys = ["module." + _ for _ in current_keys]
 
-            # convert hte keys
+            # convert the keys
             state_dict_to_load = copy.deepcopy(self.model.state_dict())
             for key_idx, key in enumerate(preload_keys):
                 state_dict_to_load[current_keys[key_idx]] = preload_model['state_dicts']['model'][preload_keys[key_idx]]
@@ -101,7 +101,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         dataset: BaseImageDataset
         dataset = hydra.utils.instantiate(cfg.task.dataset)
 
-        if cfg.training.pad_before_clip_weight:
+        if OmegaConf.select(cfg, "training.pad_before_clip_weight") is not None and cfg.training.pad_before_clip_weight:
             normal_clip_indices = 1-dataset.sampler.pad_before_indices
             scaled_pad_before_indices = dataset.sampler.pad_before_indices * cfg.training.pad_before_clip_weight
             sample_weights = normal_clip_indices + scaled_pad_before_indices
@@ -115,7 +115,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         # configure validation dataset
         val_dataset = dataset.get_validation_dataset()
 
-        if cfg.training.pad_before_clip_weight:
+        if OmegaConf.select(cfg, "training.pad_before_clip_weight") and cfg.training.pad_before_clip_weight:
             normal_clip_indices = 1-val_dataset.sampler.pad_before_indices
             scaled_pad_before_indices = val_dataset.sampler.pad_before_indices * cfg.training.pad_before_clip_weight
             sample_weights = normal_clip_indices + scaled_pad_before_indices
@@ -202,7 +202,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
             for local_epoch_idx in range(cfg.training.num_epochs):
                 step_log = dict()
                 # ========= train for this epoch ==========
-                if cfg.training.freeze_encoder:
+                if OmegaConf.select(cfg, "training.freeze_encoder") is not None and cfg.training.freeze_encoder:
                     self.model.obs_encoder.eval()
                     self.model.obs_encoder.requires_grad_(False)
 
@@ -287,7 +287,9 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                         gt_action = batch['action']
 
                         print("ln285 predict action")
-                        result = policy.predict_action(obs_dict, debug_batch_dict=batch)
+                        # result = policy.predict_action(obs_dict, debug_batch_dict=batch)
+                        result = policy.predict_action(obs_dict)
+
                         pred_action = result['action_pred']
                         mse = torch.nn.functional.mse_loss(pred_action, gt_action)
                         step_log['train_action_mse_error'] = mse.item()
@@ -318,7 +320,9 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                                 obs_dict = batch['obs']
                                 gt_action = batch['action']
 
-                                result = policy.predict_action(obs_dict, debug_batch_dict=batch)
+                                # result = policy.predict_action(obs_dict, debug_batch_dict=batch)
+                                result = policy.predict_action(obs_dict)
+
                                 pred_action = result['action_pred']
                                 mse = torch.nn.functional.mse_loss(pred_action, gt_action)
                                 val_mse_errors.append(mse)
