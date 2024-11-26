@@ -210,6 +210,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                 with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}",
                         leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                     for batch_idx, batch in enumerate(tepoch):
+                        print(f"ln213 evaluating batch {batch_idx}")
                         # device transfer
                         # batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
 
@@ -231,6 +232,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
                         # update ema
                         if cfg.training.use_ema:
+                            print("ln235 updating ema")
                             ema.step(self.model)
 
                         # logging
@@ -275,6 +277,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                 # batch = next(iter(train_dataloader))
                 # run diffusion sampling on a training batch
                 if (self.epoch % cfg.training.sample_every) == 0:
+                    print("ln278 evaluating mse")
                     with torch.no_grad():
                         # sample trajectory from training set, and evaluate difference
                         # batch = dict_apply(train_sampling_batch, lambda x: x.to(device, non_blocking=True))
@@ -328,6 +331,8 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
                 # checkpoint
                 if (self.epoch % cfg.training.checkpoint_every) == 0:
+                    print("ln330 Checkpointing")
+
                     # checkpointing
                     if cfg.checkpoint.save_last_ckpt:
                         self.save_checkpoint()
@@ -352,6 +357,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
                 # end of epoch
                 # log of last step is combined with validation and rollout
+                print("ln357 wandb logging")
                 wandb_run.log(step_log, step=self.global_step)
                 json_logger.log(step_log)
                 self.global_step += 1
