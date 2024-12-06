@@ -19,6 +19,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 import os
 import torch
+import datetime
 
 # def ddp_setup(rank: int, world_size: int):
 #     """
@@ -32,7 +33,7 @@ import torch
 #     torch.cuda.set_device(rank)
 #     init_process_group(backend="nccl", rank=rank, world_size=world_size)
 def ddp_setup():
-    init_process_group(backend="nccl")
+    init_process_group(backend="nccl", timeout=datetime.timedelta(seconds=1500))
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
 
 # allows arbitrary python code execution in configs using the ${eval:''} resolver
