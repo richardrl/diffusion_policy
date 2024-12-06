@@ -461,7 +461,7 @@ class TransformerForDiffusion(ModuleAttrMixin):
         cond: (B,T',cond_dim)
         output: (B,T,input_dim)
         sample: noisy action
-        action: clean action
+        action: clean action (proprio)
         """
         # 1. time
 
@@ -646,8 +646,7 @@ class TransformerForDiffusion(ModuleAttrMixin):
                         assert not torch.any(torch.isnan(x_proprioceptive))
 
                 else:
-                    x = self.encoder(x,
-                                 )
+                    x = self.encoder(x)
 
             """
             Start to construct future embeddings
@@ -768,7 +767,6 @@ class TransformerForDiffusion(ModuleAttrMixin):
                     tgt_mask=mask.clone().detach(),
                     memory_mask=memory_mask.clone().detach()
                 )
-
             elif self.use_flatten_hands_2x:
                 # -> effective_batch, 2*horizon
 
@@ -842,6 +840,8 @@ class TransformerForDiffusion(ModuleAttrMixin):
 
                     # any query can access the memory
                     # for each memory mask, each action can only attend to
+                    import pdb
+                    pdb.set_trace()
                     x = self.decoder(
                         tgt=x,
                         tgt_mask=tgt_mask,

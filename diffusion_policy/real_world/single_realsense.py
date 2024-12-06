@@ -301,6 +301,7 @@ class SingleRealsense(mp.Process):
 
             # start pipeline
             pipeline = rs.pipeline()
+
             pipeline_profile = pipeline.start(rs_config)
 
             # report global time
