@@ -276,6 +276,8 @@ class TransformerForDiffusion(ModuleAttrMixin):
         timestep: (B,) or int, diffusion step
         cond: (B,T',cond_dim)
         output: (B,T,input_dim)
+        sample: noisy action
+        action: clean action (proprio)
         """
         # 1. time
         timesteps = timestep
