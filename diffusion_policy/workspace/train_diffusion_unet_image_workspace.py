@@ -34,11 +34,32 @@ from torch.utils.data import WeightedRandomSampler, default_collate
 import copy
 
 from omegaconf import DictConfig, OmegaConf
-from workspace.train_diffusion_ego4d_unet_image_workspace import compute_loss
-
+from workspace.train_util import compute_loss
+import time
 from policy.handtransformer_v2_policy import HandTransformerV2
+from torch.distributions import Categorical
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
+
+# stores qk norms
+# attention entropy
+logging_activations = dict()
+
+def patch_attention(m):
+    forward_orig = m.forward
+
+    def wrap(*args, **kwargs):
+        kwargs['need_weights'] = True
+        kwargs['average_attn_weights'] = False
+
+        return forward_orig(*args, **kwargs)
+
+    m.forward = wrap
+
+# for module in transformer.modules():
+#     if isinstance(module, nn.MultiheadAttention):
+#         utils.patch_attention(module)
+#         module.register_forward_hook(save_output)
 
 class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
     include_keys = ['global_step', 'epoch']
@@ -57,8 +78,32 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
         # try:
         self.model: DiffusionUnetImagePolicy = hydra.utils.instantiate(cfg.policy)
-        # except:
-        # self.model = recursive_instantiate(cfg.policy)
+
+        def store_in_activation(name):
+            def hook(model, input, output):
+                query, key, value = input
+
+                attn_output, attn_output_weights = output
+
+                assert not torch.any(torch.isnan(query))
+                assert not torch.any(torch.isnan(key))
+                assert not torch.any(torch.isnan(value))
+                assert not torch.any(torch.isnan(attn_output))
+                assert not torch.any(torch.isnan(attn_output_weights))
+
+                logging_activations[f"{name} query norm"] = torch.mean(torch.linalg.norm(query.detach(), axis=-1))
+                logging_activations[f"{name} key norm"] = torch.mean(torch.linalg.norm(key.detach(), axis=-1))
+                logging_activations[f"{name} value norm"] = torch.mean(torch.linalg.norm(value.detach(), axis=-1))
+
+                flattened = attn_output_weights.detach().reshape(-1, attn_output_weights.detach().shape[-1])
+                logging_activations[f"{name} attention weights entropy"] = torch.mean(Categorical(probs=flattened[torch.sum(flattened, axis=1) != 0]).entropy())
+            return hook
+
+        print("Logging, disable this for inference")
+        # for name, module in self.model.named_modules():
+        #     if module.__class__.__name__ == "MultiheadAttention":
+        #         patch_attention(module)
+        #         module.register_forward_hook(store_in_activation(name))
 
 
         self.ema_model: DiffusionUnetImagePolicy = None
@@ -66,8 +111,13 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
             self.ema_model = copy.deepcopy(self.model)
 
         # configure training state
-        self.optimizer = hydra.utils.instantiate(
-            cfg.optimizer, params=self.model.parameters())
+        #
+        if "transformer" in self.model.__class__.__name__.lower():
+            print("using transformer optimizer")
+            self.optimizer = self.model.get_optimizer(**cfg.optimizer)
+        else:
+            self.optimizer = hydra.utils.instantiate(
+                cfg.optimizer, params=self.model.parameters())
 
         # configure training state
         self.global_step = 0
@@ -218,6 +268,9 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
+
+        wandb.watch(self.model, log="all", log_freq=cfg.training.wandb_log_freq)
+
         with JsonLogger(log_path) as json_logger:
             for local_epoch_idx in range(cfg.training.num_epochs + 1):
                 step_log = dict()
@@ -243,9 +296,12 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                         # compute loss
                         # raw_loss = self.model.compute_loss(batch)
 
+                        # pred: effective_batch, horizon, action_dim
+                        # target: effective_batch, horizon, action_dim
                         pred, target = self.model(batch)
                         batch_size = pred.shape[0]
-
+                        # TODO:
+                        print("ln302 check wtf is happening here. What is the size of everything")
                         raw_loss = compute_loss(pred, target, torch.ones(batch_size, self.model.horizon).to(pred.device),
                                             self.model,
                                                 valid_label_boolean=torch.ones(batch_size).to(pred.device).to(
@@ -314,6 +370,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                     train_l1_errors = list()
                     train_error_counts = list()
 
+                    t_sample = time.time()
                     with tqdm.tqdm(train_dataloader, desc=f"Training inference epoch {self.epoch}",
                                    leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                         for batch_idx, batch in enumerate(tepoch):
@@ -343,7 +400,8 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                         if len(train_mse_errors) > 0:
                             step_log['train_action_mse_error'] = torch.sum(torch.Tensor(train_mse_errors)) / torch.sum(torch.Tensor(train_error_counts))
                             step_log['train_action_l1_error'] = torch.sum(torch.Tensor(train_l1_errors)) / torch.sum(torch.Tensor(train_error_counts))
-
+                    print("Train sample time")
+                    print(time.time() - t_sample)
                 # run validation
                 if (self.epoch % cfg.training.val_every) == 0:
                     with torch.no_grad():

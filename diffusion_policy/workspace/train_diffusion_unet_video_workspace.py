@@ -1,3 +1,5 @@
+import workspace.train_util
+
 if __name__ == "__main__":
     import sys
     import os
@@ -142,7 +144,7 @@ class TrainDiffusionUnetVideoWorkspace(BaseWorkspace):
                     batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
 
                     # compute loss
-                    raw_loss = self.model.compute_loss(batch)
+                    raw_loss = workspace.train_util.compute_loss(batch)
                     loss = raw_loss / cfg.training.gradient_accumulate_every
                     loss.backward()
 

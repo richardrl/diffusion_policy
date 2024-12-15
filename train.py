@@ -33,7 +33,7 @@ import datetime
 #     torch.cuda.set_device(rank)
 #     init_process_group(backend="nccl", rank=rank, world_size=world_size)
 def ddp_setup():
-    init_process_group(backend="nccl", timeout=datetime.timedelta(seconds=1500))
+    init_process_group(backend="nccl", timeout=datetime.timedelta(seconds=300))
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
 
 # allows arbitrary python code execution in configs using the ${eval:''} resolver
