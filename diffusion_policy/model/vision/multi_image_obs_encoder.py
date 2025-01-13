@@ -169,8 +169,6 @@ class MultiImageObsEncoder(ModuleAttrMixin):
                 feature = self.key_model_map[key](img)
                 features.append(feature)
 
-        import pdb
-        pdb.set_trace()
         # process lowdim input
         print("starting low dim")
         for key in self.low_dim_keys:

@@ -45,6 +45,7 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 # attention entropy
 logging_activations = dict()
 
+# i forgot what this was for
 def patch_attention(m):
     forward_orig = m.forward
 
